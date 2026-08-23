@@ -1,0 +1,39 @@
+# Local product-planning documents
+/PRD.md
+/README.md
+/docs/
+/vertical-slices/
+/outputs/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Operating system and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Dependencies and generated files
+node_modules/
+.gradle/
+target/
+build/
+dist/
+out/
+.cache/
+coverage/
+
+# Mobile build and user-specific files
+DerivedData/
+xcuserdata/
+*.xcuserstate
+local.properties
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
