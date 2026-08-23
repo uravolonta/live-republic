@@ -13,6 +13,10 @@ spring:
   session:
     jdbc:
       initialize-schema: always
+  web:
+    error:
+      # 오류 응답의 message는 서버가 작성한 사용자 안내문이다. 화면이 그대로 표시한다.
+      include-message: always
 
 management:
   endpoints:

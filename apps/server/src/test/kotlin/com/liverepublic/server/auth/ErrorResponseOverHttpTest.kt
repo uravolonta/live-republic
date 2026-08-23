@@ -53,4 +53,28 @@ class ErrorResponseOverHttpTest {
         val unauthorized = client().get().uri("/api/shops/my").retrieve().toBodilessEntity().statusCode.value()
         assertEquals(401, unauthorized)
     }
+
+    @Test
+    fun `400 응답 본문에 서버가 작성한 안내문이 포함된다`() {
+        // Owner 준비
+        val email = "http-message@test.local"
+        postJson("/api/auth/signup", """{"email":"$email","password":"password-123","name":"안내"}""")
+        val login = client().post().uri("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+            .body("""{"email":"$email","password":"password-123"}""")
+            .retrieve().toBodilessEntity()
+        val sessionCookie = requireNotNull(login.headers["Set-Cookie"]?.firstOrNull()) { "SESSION Cookie 없음" }
+            .substringBefore(";")
+        client().post().uri("/api/shops").header("Cookie", sessionCookie)
+            .contentType(MediaType.APPLICATION_JSON).body("""{"name":"안내 상점"}""")
+            .retrieve().toBodilessEntity()
+
+        // '/' 포함 Option → 400 본문의 message가 화면에 그대로 표시할 안내문이다.
+        val res = client().post().uri("/api/products").header("Cookie", sessionCookie)
+            .contentType(MediaType.APPLICATION_JSON)
+            .body("""{"name":"안내 상품","price":1000,"optionGroups":[{"name":"색상","options":["A / B"]}]}""")
+            .retrieve().toEntity(String::class.java)
+        assertEquals(400, res.statusCode.value())
+        val body = requireNotNull(res.body)
+        assert(body.contains("Option 이름에는")) { "본문에 안내문이 없다: $body" }
+    }
 }

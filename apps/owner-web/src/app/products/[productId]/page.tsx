@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import { api, type Product, type Sku } from "@/lib/api";
+import { api, errorMessage, type Product, type Sku } from "@/lib/api";
 
 /** 상품 상세: 기본정보 수정과 SKU별 재고 관리. */
 export default function ProductDetailPage() {
@@ -68,7 +68,7 @@ export default function ProductDetailPage() {
     } else if (res.status === 401) {
       router.replace("/login");
     } else if (res.status === 400) {
-      setInfoError("입력값을 확인하세요.");
+      setInfoError(errorMessage(res.body) ?? "입력값을 확인하세요.");
     } else {
       setInfoError("일시적인 오류로 저장하지 못했습니다. 잠시 후 다시 시도하세요.");
     }
@@ -94,9 +94,7 @@ export default function ProductDetailPage() {
     } else if (res.status === 401) {
       router.replace("/login");
     } else if (res.status === 400) {
-      setSkuError(
-        "수량을 확인하세요. 보유 수량은 확보(입금대기)와 판매 확정 수량의 합보다 적을 수 없습니다.",
-      );
+      setSkuError(errorMessage(res.body) ?? "수량을 확인하세요.");
     } else {
       setSkuError("일시적인 오류로 저장하지 못했습니다. 잠시 후 다시 시도하세요.");
     }

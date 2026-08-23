@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { api, type Product } from "@/lib/api";
+import { api, errorMessage, type Product } from "@/lib/api";
 
 type OptionGroupForm = { name: string; optionsText: string };
 
@@ -54,7 +54,9 @@ export default function NewProductPage() {
     }
     setSubmitting(false);
     if (res.status === 401) router.replace("/login");
-    else if (res.status === 400) setError("입력값을 확인하세요. 중복 Option은 사용할 수 없습니다.");
+    else if (res.status === 400)
+      // 서버가 원인별 안내문을 내려준다 (조합 상한, 금지 문자, 길이, 중복 등).
+      setError(errorMessage(res.body) ?? "입력값을 확인하세요.");
     else setError("일시적인 오류로 등록하지 못했습니다. 잠시 후 다시 시도하세요.");
   }
 
