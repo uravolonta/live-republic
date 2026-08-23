@@ -53,12 +53,20 @@ export default function ProductsPage() {
         </Link>
       </header>
 
-      <Link
-        href="/products/new"
-        className="rounded-lg bg-black px-4 py-2 text-center text-white"
-      >
-        새 상품 등록
-      </Link>
+      <div className="flex gap-3">
+        <Link
+          href="/products/new"
+          className="flex-1 rounded-lg bg-black px-4 py-2 text-center text-white"
+        >
+          새 상품 등록
+        </Link>
+        <Link
+          href="/products/import"
+          className="flex-1 rounded-lg border px-4 py-2 text-center"
+        >
+          Excel 일괄 등록
+        </Link>
+      </div>
 
       {products.length === 0 ? (
         <p className="text-sm text-gray-500">
