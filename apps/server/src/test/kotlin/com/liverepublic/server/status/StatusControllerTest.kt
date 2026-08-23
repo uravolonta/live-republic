@@ -19,6 +19,6 @@ class StatusControllerTest {
         mockMvc.perform(get("/api/status"))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.service").value("live-republic-server"))
-            .andExpect(jsonPath("$.status").value("ok"))
+            .andExpect(jsonPath("$.status").value("intentionally-broken"))
     }
 }
