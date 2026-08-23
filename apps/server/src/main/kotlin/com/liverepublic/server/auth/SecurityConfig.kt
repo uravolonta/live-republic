@@ -1,5 +1,6 @@
 package com.liverepublic.server.auth
 
+import jakarta.servlet.DispatcherType
 import org.springframework.context.annotation.Bean
 import org.springframework.context.annotation.Configuration
 import org.springframework.http.HttpStatus
@@ -39,7 +40,10 @@ class SecurityConfig {
             .securityContext { it.securityContextRepository(securityContextRepository) }
             .exceptionHandling { it.authenticationEntryPoint(HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED)) }
             .authorizeHttpRequests {
-                it.requestMatchers("/api/auth/signup", "/api/auth/login", "/api/status").permitAll()
+                // 오류 응답의 ERROR dispatch(/error)까지 인증을 요구하면 400·409 같은
+                // 오류가 전부 401로 가려진다. ERROR dispatch는 허용한다.
+                it.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
+                    .requestMatchers("/api/auth/signup", "/api/auth/login", "/api/status").permitAll()
                     .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .anyRequest().authenticated()
             }
