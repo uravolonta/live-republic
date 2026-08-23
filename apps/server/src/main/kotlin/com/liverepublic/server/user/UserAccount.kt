@@ -20,10 +20,14 @@ class UserAccount(
     val email: String,
 
     @Column(name = "password_hash", nullable = false)
-    val passwordHash: String,
+    var passwordHash: String,
 
     @Column(nullable = false)
     val name: String,
+
+    /** Streamer 서브계정은 임시 비밀번호로 생성되며 최초 로그인 후 변경 전까지 보호 기능이 제한된다. */
+    @Column(name = "must_change_password", nullable = false)
+    var mustChangePassword: Boolean = false,
 
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     val createdAt: OffsetDateTime? = null,
