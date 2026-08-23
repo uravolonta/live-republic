@@ -13,17 +13,20 @@ export default function Home() {
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
+  const [logoutFailed, setLogoutFailed] = useState(false);
 
   useEffect(() => {
     (async () => {
       const meRes = await api<Me>("/api/auth/me");
-      if (meRes.status === 0) {
-        setLoadError(true);
-        setLoading(false);
+      // 로그인 이동은 401에만 적용한다. 통신 단절·서버 오류는 불러오기 오류로 처리해
+      // 서버 장애를 인증 문제로 오인하지 않게 한다.
+      if (meRes.status === 401) {
+        router.replace("/login");
         return;
       }
       if (meRes.status !== 200 || !meRes.body) {
-        router.replace("/login");
+        setLoadError(true);
+        setLoading(false);
         return;
       }
       setMe(meRes.body);
@@ -43,8 +46,13 @@ export default function Home() {
   }, [router]);
 
   const logout = useCallback(async () => {
-    await api("/api/auth/logout", { method: "POST" });
-    router.replace("/login");
+    // 서버 세션 무효화가 확인된 경우에만 로그아웃으로 처리한다.
+    const res = await api("/api/auth/logout", { method: "POST" });
+    if (res.status === 204) {
+      router.replace("/login");
+    } else {
+      setLogoutFailed(true);
+    }
   }, [router]);
 
   if (loadError) {
@@ -73,6 +81,11 @@ export default function Home() {
           로그아웃
         </button>
       </header>
+      {logoutFailed && (
+        <p className="text-sm text-red-600">
+          로그아웃에 실패했습니다. 잠시 후 다시 시도하세요.
+        </p>
+      )}
       <p className="text-sm text-gray-500">{me.name} 님, Shop 운영 화면입니다.</p>
 
       <section className="rounded-lg border p-4">

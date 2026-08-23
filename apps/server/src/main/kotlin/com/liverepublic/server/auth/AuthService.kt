@@ -19,6 +19,8 @@ data class AuthUser(
     val name: String,
 ) : java.io.Serializable
 
+private const val BCRYPT_MAX_PASSWORD_BYTES = 72
+
 @Service
 class AuthService(
     private val userAccountRepository: UserAccountRepository,
@@ -29,6 +31,11 @@ class AuthService(
 
     @Transactional
     fun signup(email: String, password: String, name: String): AuthUser {
+        // BCrypt는 UTF-8 기준 72바이트까지만 처리한다. 한글 등 다중 바이트 문자는
+        // 문자 수 검증(@Size)을 통과해도 초과할 수 있으므로 바이트 길이를 따로 검증한다.
+        if (password.toByteArray(Charsets.UTF_8).size > BCRYPT_MAX_PASSWORD_BYTES) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용하세요.")
+        }
         if (userAccountRepository.existsByEmail(email)) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.")
         }
@@ -44,6 +51,10 @@ class AuthService(
 
     @Transactional(readOnly = true)
     fun authenticate(email: String, password: String): AuthUser {
+        // 72바이트 초과 비밀번호는 저장될 수 없으므로 BCrypt 예외 대신 인증 실패로 처리한다.
+        if (password.toByteArray(Charsets.UTF_8).size > BCRYPT_MAX_PASSWORD_BYTES) {
+            throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "이메일 또는 비밀번호가 올바르지 않습니다.")
+        }
         val user = userAccountRepository.findByEmail(email)
             ?: throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "이메일 또는 비밀번호가 올바르지 않습니다.")
         if (!passwordEncoder.matches(password, user.passwordHash)) {
