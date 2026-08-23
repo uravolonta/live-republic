@@ -170,12 +170,45 @@ class ProductExcelFlowTest {
         mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
             .andExpect(status().isBadRequest)
             .andExpect(jsonPath("$.errors").isArray)
+            // 필드 오류(3행 가격)와 상품 단위 오류(4행 중복 조합)가 한 번에 반환된다.
+            .andExpect(jsonPath("$.errors.length()").value(2))
             .andExpect(jsonPath("$.errors[0].row").value(3))
+            .andExpect(jsonPath("$.errors[1].row").value(4))
 
         // 부분 등록 없음
         mockMvc.perform(get("/api/products").cookie(session))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.length()").value(0))
+    }
+
+    @Test
+    fun `옵션 제약 오류는 실제 발생 행 번호로 안내된다`() {
+        val session = ownerSession("excel-rownum@test.local")
+        val longOption = "가".repeat(51)
+        val file = xlsx(
+            listOf(
+                listOf("코트", "90000", "", "색상", "검정", "", "", "", "", "1"), // 2행 정상
+                listOf("코트", "90000", "", "색상", longOption, "", "", "", "", "1"), // 3행 옵션 길이 초과
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].row").value(3))
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("50자")))
+    }
+
+    @Test
+    fun `한 행에서 옵션그룹 이름이 중복되면 거절된다`() {
+        val session = ownerSession("excel-dupgroup@test.local")
+        val file = xlsx(
+            listOf(
+                listOf("신발", "40000", "", "색상", "검정", "색상", "흰색", "", "", "1"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].row").value(2))
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("옵션그룹 이름이 중복")))
     }
 
     @Test

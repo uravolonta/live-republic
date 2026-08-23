@@ -184,6 +184,10 @@ class ProductService(
         if (optionGroups.size > 3) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group은 최대 3개까지 가능합니다.")
         }
+        // 그룹 이름이 겹치면 조합(SKU)을 이름으로 구분할 수 없다.
+        if (optionGroups.map { it.name }.toSet().size != optionGroups.size) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름이 중복됩니다. 그룹마다 다른 이름을 사용하세요.")
+        }
         optionGroups.forEach { group ->
             if (group.name.isBlank() || group.name.length > 50) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름은 1자 이상 50자 이하여야 합니다.")
