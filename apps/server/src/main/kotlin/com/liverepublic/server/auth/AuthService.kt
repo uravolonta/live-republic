@@ -31,11 +31,8 @@ class AuthService(
 
     @Transactional
     fun signup(email: String, password: String, name: String): AuthUser {
-        // BCrypt는 UTF-8 기준 72바이트까지만 처리한다. 한글 등 다중 바이트 문자는
-        // 문자 수 검증(@Size)을 통과해도 초과할 수 있으므로 바이트 길이를 따로 검증한다.
-        if (password.toByteArray(Charsets.UTF_8).size > BCRYPT_MAX_PASSWORD_BYTES) {
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "비밀번호가 너무 깁니다. 더 짧은 비밀번호를 사용하세요.")
-        }
+        // 비밀번호 charset·길이는 SignupRequest의 @Pattern(인쇄 가능한 ASCII)과 @Size가 검증한다.
+        // ASCII 72자 이하 = 72바이트 이하이므로 BCrypt 한계를 넘지 않는다.
         if (userAccountRepository.existsByEmail(email)) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "이미 가입된 이메일입니다.")
         }
@@ -51,7 +48,8 @@ class AuthService(
 
     @Transactional(readOnly = true)
     fun authenticate(email: String, password: String): AuthUser {
-        // 72바이트 초과 비밀번호는 저장될 수 없으므로 BCrypt 예외 대신 인증 실패로 처리한다.
+        // 로그인 입력은 charset 검증이 없으므로, BCrypt 한계(72바이트)를 넘는 값은
+        // 저장됐을 수 없는 비밀번호로 보고 예외 대신 인증 실패로 처리한다.
         if (password.toByteArray(Charsets.UTF_8).size > BCRYPT_MAX_PASSWORD_BYTES) {
             throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "이메일 또는 비밀번호가 올바르지 않습니다.")
         }

@@ -34,7 +34,7 @@ class ErrorResponseOverHttpTest {
 
     @Test
     fun `오류 응답이 401로 가려지지 않고 본래 상태로 전달된다`() {
-        // 72바이트 초과 비밀번호 → 400
+        // ASCII가 아닌 비밀번호 → 400 (정책: 영문 대소문자·숫자·특수문자만 허용)
         val hangul25 = "가".repeat(25)
         assertEquals(
             HttpStatus.BAD_REQUEST,

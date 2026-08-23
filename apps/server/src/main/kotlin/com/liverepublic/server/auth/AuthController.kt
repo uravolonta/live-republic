@@ -5,6 +5,7 @@ import jakarta.servlet.http.HttpServletResponse
 import jakarta.validation.Valid
 import jakarta.validation.constraints.Email
 import jakarta.validation.constraints.NotBlank
+import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken
@@ -21,7 +22,11 @@ import org.springframework.web.bind.annotation.RestController
 
 data class SignupRequest(
     @field:Email @field:NotBlank val email: String,
-    @field:Size(min = 8, max = 72) val password: String,
+    // 정책(2026-08-23 사람 결정): 비밀번호는 영문 대소문자·숫자·특수문자만 허용한다.
+    // [!-~]는 공백을 제외한 인쇄 가능한 ASCII 전체이므로 한글 등 다중 바이트 문자를 거른다.
+    @field:Size(min = 8, max = 72)
+    @field:Pattern(regexp = "^[!-~]+$", message = "비밀번호는 영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다.")
+    val password: String,
     @field:NotBlank @field:Size(max = 100) val name: String,
 )
 

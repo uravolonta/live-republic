@@ -81,15 +81,16 @@ class OwnerShopFlowTest {
     }
 
     @Test
-    fun `한글 등 72바이트를 넘는 비밀번호는 400으로 거절된다`() {
-        // 한글 25자 = 75바이트: 문자 수 검증은 통과하지만 BCrypt 한계를 넘는다.
-        val hangul25 = "가".repeat(25)
+    fun `한글 등 ASCII가 아닌 비밀번호는 길이와 무관하게 400으로 거절된다`() {
+        // 정책: 비밀번호는 영문 대소문자·숫자·특수문자만 허용한다.
+        val hangul8 = "가".repeat(8) // 문자 수 검증(@Size min 8)은 통과하는 길이
         mockMvc.perform(
             post("/api/auth/signup").contentType(MediaType.APPLICATION_JSON)
-                .content("""{"email":"bytes@test.local","password":"$hangul25","name":"바이트"}"""),
+                .content("""{"email":"bytes@test.local","password":"$hangul8","name":"바이트"}"""),
         ).andExpect(status().isBadRequest)
 
-        // 로그인에서도 500이 아니라 인증 실패로 처리된다.
+        // BCrypt 72바이트 한계를 넘는 값도 로그인에서 500이 아니라 인증 실패로 처리된다.
+        val hangul25 = "가".repeat(25)
         mockMvc.perform(
             post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
                 .content("""{"email":"bytes@test.local","password":"$hangul25"}"""),

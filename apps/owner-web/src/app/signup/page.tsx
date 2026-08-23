@@ -16,6 +16,11 @@ export default function SignupPage() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError(null);
+    // 정책: 비밀번호는 영문 대소문자·숫자·특수문자(인쇄 가능한 ASCII)만 허용한다.
+    if (!/^[!-~]{8,72}$/.test(password)) {
+      setError("비밀번호는 8자 이상의 영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다.");
+      return;
+    }
     setSubmitting(true);
     const res = await api<Me>("/api/auth/signup", {
       method: "POST",
@@ -35,7 +40,9 @@ export default function SignupPage() {
     setSubmitting(false);
     if (res.status === 409) setError("이미 가입된 이메일입니다.");
     else if (res.status === 400)
-      setError("입력값을 확인하세요. 비밀번호는 8자 이상이어야 합니다.");
+      setError(
+        "입력값을 확인하세요. 비밀번호는 8자 이상의 영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다.",
+      );
     else setError("가입에 실패했습니다. 잠시 후 다시 시도하세요.");
   }
 
@@ -63,7 +70,10 @@ export default function SignupPage() {
           type="password"
           required
           minLength={8}
-          placeholder="비밀번호 (8자 이상)"
+          maxLength={72}
+          pattern="[!-~]{8,72}"
+          title="영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다 (8자 이상)."
+          placeholder="비밀번호 (영문·숫자·특수문자 8자 이상)"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
           className="rounded border p-2"
