@@ -1,0 +1,234 @@
+package com.liverepublic.server.product
+
+import com.liverepublic.server.TestcontainersConfiguration
+import jakarta.servlet.http.Cookie
+import org.apache.poi.xssf.usermodel.XSSFWorkbook
+import org.junit.jupiter.api.Test
+import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.boot.test.context.SpringBootTest
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
+import org.springframework.context.annotation.Import
+import org.springframework.http.MediaType
+import org.springframework.mock.web.MockMultipartFile
+import org.springframework.test.web.servlet.MockMvc
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.multipart
+import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
+import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
+import java.io.ByteArrayOutputStream
+
+@Import(TestcontainersConfiguration::class)
+@SpringBootTest
+@AutoConfigureMockMvc
+class ProductExcelFlowTest {
+
+    @Autowired
+    lateinit var mockMvc: MockMvc
+
+    private fun ownerSession(email: String): Cookie {
+        mockMvc.perform(
+            post("/api/auth/signup").contentType(MediaType.APPLICATION_JSON)
+                .content("""{"email":"$email","password":"password-123","name":"Excel Owner"}"""),
+        ).andExpect(status().isCreated)
+        val login = mockMvc.perform(
+            post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                .content("""{"email":"$email","password":"password-123"}"""),
+        ).andExpect(status().isOk).andReturn()
+        val session = requireNotNull(login.response.getCookie("SESSION"))
+        mockMvc.perform(
+            post("/api/shops").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"$email 의 상점"}"""),
+        ).andExpect(status().isCreated)
+        return session
+    }
+
+    /** rows: 헤더를 제외한 데이터 행. */
+    private fun xlsx(rows: List<List<String>>): MockMultipartFile {
+        XSSFWorkbook().use { workbook ->
+            val sheet = workbook.createSheet("상품")
+            val header = sheet.createRow(0)
+            ProductExcelService.HEADERS.forEachIndexed { i, name -> header.createCell(i).setCellValue(name) }
+            rows.forEachIndexed { ri, values ->
+                val row = sheet.createRow(ri + 1)
+                values.forEachIndexed { ci, value -> row.createCell(ci).setCellValue(value) }
+            }
+            val out = ByteArrayOutputStream()
+            workbook.write(out)
+            return MockMultipartFile(
+                "file", "products.xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                out.toByteArray(),
+            )
+        }
+    }
+
+    @Test
+    fun `템플릿을 내려받을 수 있다`() {
+        val session = ownerSession("excel-template@test.local")
+        mockMvc.perform(get("/api/products/excel/template").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(header().string("Content-Disposition", org.hamcrest.Matchers.containsString(".xlsx")))
+    }
+
+    @Test
+    fun `여러 상품과 SKU 재고를 한 번에 등록한다`() {
+        val session = ownerSession("excel-upload@test.local")
+        val file = xlsx(
+            listOf(
+                listOf("티셔츠", "15000", "부드러운 면", "색상", "빨강", "사이즈", "M", "", "", "10"),
+                listOf("티셔츠", "15000", "부드러운 면", "색상", "빨강", "사이즈", "L", "", "", "5"),
+                listOf("티셔츠", "15000", "부드러운 면", "색상", "파랑", "사이즈", "M", "", "", "0"),
+                listOf("티셔츠", "15000", "부드러운 면", "색상", "파랑", "사이즈", "L", "", "", "8"),
+                listOf("양말", "3000", "", "", "", "", "", "", "", "30"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.createdProducts").value(2))
+            .andExpect(jsonPath("$.createdSkus").value(5))
+
+        // 재고가 행대로 반영됐는지 확인
+        val list = mockMvc.perform(get("/api/products").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.length()").value(2))
+            .andReturn().response.contentAsString
+        assert(list.contains("\"available\":10")) { "빨강/M 재고 10이 없다: $list" }
+        assert(list.contains("\"available\":30")) { "양말 재고 30이 없다: $list" }
+    }
+
+    @Test
+    fun `파일에 있는 조합만 SKU로 생성된다 - Cartesian 아님`() {
+        val session = ownerSession("excel-partial@test.local")
+        // 빨강/M, 파랑/L 두 행만 작성 — 빨강/L, 파랑/M은 만들어지지 않아야 한다.
+        val file = xlsx(
+            listOf(
+                listOf("자켓", "50000", "", "색상", "빨강", "사이즈", "M", "", "", "3"),
+                listOf("자켓", "50000", "", "색상", "파랑", "사이즈", "L", "", "", "2"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.createdSkus").value(2))
+
+        val list = mockMvc.perform(get("/api/products").cookie(session))
+            .andReturn().response.contentAsString
+        assert(list.contains("빨강 / M") && list.contains("파랑 / L")) { list }
+        assert(!list.contains("빨강 / L") && !list.contains("파랑 / M")) { "없는 조합이 생성됨: $list" }
+    }
+
+    @Test
+    fun `시트나 헤더가 템플릿과 다르면 거절된다`() {
+        val session = ownerSession("excel-structure@test.local")
+
+        // '상품' 시트 없음
+        val wrongSheet = XSSFWorkbook().use { wb ->
+            wb.createSheet("Sheet1").createRow(0).createCell(0).setCellValue("상품명")
+            val out = ByteArrayOutputStream()
+            wb.write(out)
+            MockMultipartFile("file", "wrong.xlsx", "application/octet-stream", out.toByteArray())
+        }
+        mockMvc.perform(multipart("/api/products/excel").file(wrongSheet).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("시트")))
+
+        // 헤더 열 순서 변경
+        val wrongHeader = XSSFWorkbook().use { wb ->
+            val sheet = wb.createSheet("상품")
+            val header = sheet.createRow(0)
+            listOf("가격", "상품명").forEachIndexed { i, v -> header.createCell(i).setCellValue(v) }
+            val out = ByteArrayOutputStream()
+            wb.write(out)
+            MockMultipartFile("file", "wrong2.xlsx", "application/octet-stream", out.toByteArray())
+        }
+        mockMvc.perform(multipart("/api/products/excel").file(wrongHeader).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("헤더")))
+    }
+
+    @Test
+    fun `상품명과 설명 길이 제한이 화면 등록과 동일하게 적용된다`() {
+        val session = ownerSession("excel-length@test.local")
+        val longName = "가".repeat(201)
+        val file = xlsx(listOf(listOf(longName, "1000", "", "", "", "", "", "", "", "1")))
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("200자")))
+    }
+
+    @Test
+    fun `오류 행이 있으면 아무것도 등록되지 않고 행별 이유를 반환한다`() {
+        val session = ownerSession("excel-invalid@test.local")
+        val file = xlsx(
+            listOf(
+                listOf("모자", "9000", "", "색상", "검정", "", "", "", "", "10"),
+                listOf("모자", "가격오류", "", "색상", "흰색", "", "", "", "", "5"),
+                listOf("모자", "9000", "", "색상", "검정", "", "", "", "", "3"), // 중복 조합
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors").isArray)
+            // 필드 오류(3행 가격)와 상품 단위 오류(4행 중복 조합)가 한 번에 반환된다.
+            .andExpect(jsonPath("$.errors.length()").value(2))
+            .andExpect(jsonPath("$.errors[0].row").value(3))
+            .andExpect(jsonPath("$.errors[1].row").value(4))
+
+        // 부분 등록 없음
+        mockMvc.perform(get("/api/products").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.length()").value(0))
+    }
+
+    @Test
+    fun `옵션 제약 오류는 실제 발생 행 번호로 안내된다`() {
+        val session = ownerSession("excel-rownum@test.local")
+        val longOption = "가".repeat(51)
+        val file = xlsx(
+            listOf(
+                listOf("코트", "90000", "", "색상", "검정", "", "", "", "", "1"), // 2행 정상
+                listOf("코트", "90000", "", "색상", longOption, "", "", "", "", "1"), // 3행 옵션 길이 초과
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].row").value(3))
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("50자")))
+    }
+
+    @Test
+    fun `한 행에서 옵션그룹 이름이 중복되면 거절된다`() {
+        val session = ownerSession("excel-dupgroup@test.local")
+        val file = xlsx(
+            listOf(
+                listOf("신발", "40000", "", "색상", "검정", "색상", "흰색", "", "", "1"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].row").value(2))
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("옵션그룹 이름이 중복")))
+    }
+
+    @Test
+    fun `같은 상품의 가격이 행마다 다르면 거절된다`() {
+        val session = ownerSession("excel-price@test.local")
+        val file = xlsx(
+            listOf(
+                listOf("가방", "20000", "", "색상", "갈색", "", "", "", "", "1"),
+                listOf("가방", "25000", "", "색상", "검정", "", "", "", "", "1"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("가격")))
+    }
+
+    @Test
+    fun `로그인하지 않으면 업로드할 수 없다`() {
+        val file = xlsx(listOf(listOf("상품", "1000", "", "", "", "", "", "", "", "1")))
+        mockMvc.perform(multipart("/api/products/excel").file(file))
+            .andExpect(status().isUnauthorized)
+    }
+}

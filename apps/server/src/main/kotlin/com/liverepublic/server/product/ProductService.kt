@@ -11,6 +11,9 @@ import java.time.OffsetDateTime
 
 data class NewOptionGroup(val name: String, val options: List<String>)
 
+/** 생성할 SKU 하나 — Option 조합(그룹 순서대로)과 초기 재고. */
+data class NewSkuSpec(val optionNames: List<String>, val onHand: Int)
+
 /** 상품 하나가 가질 수 있는 최대 SKU(Option 조합) 수. */
 const val MAX_SKUS_PER_PRODUCT = 100L
 
@@ -34,7 +37,7 @@ class ProductService(
     }
 
     /**
-     * 상품과 Option 구조를 등록하고 Option 조합의 Cartesian Product로 SKU를 생성한다.
+     * 상품과 Option 구조를 등록하고 Option 조합의 Cartesian Product로 SKU를 생성한다 (화면 등록).
      * Option Group이 없으면 "기본" SKU 하나를 만든다.
      */
     @Transactional
@@ -45,8 +48,40 @@ class ProductService(
         description: String?,
         optionGroups: List<NewOptionGroup>,
     ): Long {
-        val shopId = ownerShopId(userId)
+        val combinations: List<List<String>> =
+            optionGroups.fold(listOf(emptyList<String>())) { acc, group ->
+                acc.flatMap { combo -> group.options.map { combo + it } }
+            }
+        return createProductWithSkus(
+            shopId = ownerShopId(userId),
+            name = name,
+            price = price,
+            description = description,
+            optionGroups = optionGroups,
+            skus = combinations.map { NewSkuSpec(optionNames = it, onHand = 0) },
+        )
+    }
+
+    /**
+     * 명시된 Option 조합만 SKU로 생성한다 (Excel 등록: 한 행 = 한 SKU).
+     * 호출자가 shopId 소유를 이미 검증했어야 한다.
+     */
+    @Transactional
+    fun createProductWithSkus(
+        shopId: Long,
+        name: String,
+        price: Int,
+        description: String?,
+        optionGroups: List<NewOptionGroup>,
+        skus: List<NewSkuSpec>,
+    ): Long {
         validateOptionGroups(optionGroups)
+        if (skus.isEmpty() || skus.size > MAX_SKUS_PER_PRODUCT) {
+            throw ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "SKU는 상품당 1개 이상 ${MAX_SKUS_PER_PRODUCT}개 이하여야 합니다. (요청: ${skus.size}개)",
+            )
+        }
 
         val product = productRepository.save(
             Product(shopId = shopId, name = name, price = price, description = description),
@@ -54,7 +89,8 @@ class ProductService(
         val productId = product.id!!
 
         // Option Group·Option 저장 (그룹 순서대로, Option은 그룹당 일괄 저장)
-        val savedOptionsByGroup: List<List<ProductOption>> = optionGroups.mapIndexed { gi, group ->
+        val optionByGroupAndName = mutableMapOf<Pair<Int, String>, ProductOption>()
+        optionGroups.forEachIndexed { gi, group ->
             val savedGroup = optionGroupRepository.save(
                 ProductOptionGroup(productId = productId, name = group.name, position = gi),
             )
@@ -62,23 +98,34 @@ class ProductService(
                 group.options.mapIndexed { oi, optionName ->
                     ProductOption(optionGroupId = savedGroup.id!!, name = optionName, position = oi)
                 },
-            )
+            ).forEach { option -> optionByGroupAndName[gi to option.name] = option }
         }
 
-        // Option 조합별 SKU 일괄 생성
-        val combinations: List<List<ProductOption>> =
-            savedOptionsByGroup.fold(listOf(emptyList())) { acc, options ->
-                acc.flatMap { combo -> options.map { combo + it } }
+        // 명시된 조합만 SKU로 생성한다. 재고는 생성 시점에 함께 설정한다.
+        skus.forEach { spec ->
+            if (spec.optionNames.size != optionGroups.size) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "SKU 조합은 모든 Option Group의 값을 가져야 합니다.")
             }
+            spec.optionNames.forEachIndexed { gi, optionName ->
+                if (!optionByGroupAndName.containsKey(gi to optionName)) {
+                    throw ResponseStatusException(HttpStatus.BAD_REQUEST, "선언되지 않은 Option입니다: $optionName")
+                }
+            }
+        }
+        if (skus.map { it.optionNames }.toSet().size != skus.size) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 Option 조합의 SKU가 중복됐습니다.")
+        }
         val savedSkus = skuRepository.saveAll(
-            combinations.map { combo ->
-                val label = if (combo.isEmpty()) "기본" else combo.joinToString(" / ") { it.name }
-                Sku(productId = productId, optionLabel = label)
+            skus.map { spec ->
+                val label = if (spec.optionNames.isEmpty()) "기본" else spec.optionNames.joinToString(" / ")
+                Sku(productId = productId, optionLabel = label, onHand = spec.onHand)
             },
         )
         skuOptionRepository.saveAll(
-            savedSkus.zip(combinations).flatMap { (sku, combo) ->
-                combo.map { option -> SkuOption(skuId = sku.id!!, optionId = option.id!!) }
+            savedSkus.zip(skus).flatMap { (sku, spec) ->
+                spec.optionNames.mapIndexed { gi, optionName ->
+                    SkuOption(skuId = sku.id!!, optionId = optionByGroupAndName.getValue(gi to optionName).id!!)
+                }
             },
         )
         return productId
@@ -137,6 +184,10 @@ class ProductService(
         if (optionGroups.size > 3) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group은 최대 3개까지 가능합니다.")
         }
+        // 그룹 이름이 겹치면 조합(SKU)을 이름으로 구분할 수 없다.
+        if (optionGroups.map { it.name }.toSet().size != optionGroups.size) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름이 중복됩니다. 그룹마다 다른 이름을 사용하세요.")
+        }
         optionGroups.forEach { group ->
             if (group.name.isBlank() || group.name.length > 50) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름은 1자 이상 50자 이하여야 합니다.")
@@ -155,14 +206,6 @@ class ProductService(
             if (group.options.toSet().size != group.options.size) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 그룹에 중복된 Option이 있습니다.")
             }
-        }
-        // 조합 폭발 방지: 상품 하나의 SKU 수를 제한한다.
-        val combinationCount = optionGroups.fold(1L) { acc, group -> acc * group.options.size }
-        if (combinationCount > MAX_SKUS_PER_PRODUCT) {
-            throw ResponseStatusException(
-                HttpStatus.BAD_REQUEST,
-                "Option 조합(SKU)은 상품당 최대 ${MAX_SKUS_PER_PRODUCT}개까지 가능합니다. (요청: ${combinationCount}개)",
-            )
         }
     }
 }
