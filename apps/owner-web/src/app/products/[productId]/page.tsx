@@ -94,7 +94,9 @@ export default function ProductDetailPage() {
     } else if (res.status === 401) {
       router.replace("/login");
     } else if (res.status === 400) {
-      setSkuError("수량을 확인하세요. 이미 확보된 수량보다 적게 설정할 수 없습니다.");
+      setSkuError(
+        "수량을 확인하세요. 보유 수량은 확보(입금대기)와 판매 확정 수량의 합보다 적을 수 없습니다.",
+      );
     } else {
       setSkuError("일시적인 오류로 저장하지 못했습니다. 잠시 후 다시 시도하세요.");
     }
@@ -179,9 +181,9 @@ export default function ProductDetailPage() {
             <thead>
               <tr className="border-b text-left text-gray-500">
                 <th className="py-2">Option</th>
-                <th className="py-2">On Hand</th>
-                <th className="py-2 text-right">확보</th>
-                <th className="py-2 text-right">판매</th>
+                <th className="py-2">보유 (On Hand)</th>
+                <th className="py-2 text-right">확보 (입금대기)</th>
+                <th className="py-2 text-right">판매 확정</th>
                 <th className="py-2 text-right">판매 가능</th>
                 <th className="py-2"></th>
               </tr>

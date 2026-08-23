@@ -100,16 +100,20 @@ class ProductService(
         return product
     }
 
-    /** SKU의 On Hand 수량을 설정한다. 확보 수량(Reserved)보다 줄일 수 없다. */
+    /**
+     * SKU의 On Hand(실물 보유 선언값)를 설정한다.
+     * 이미 고객에게 약속된 수량(확보 Reserved + 판매 확정 Sold) 아래로 내리면
+     * Available이 음수(초과판매 상태)가 되므로 거절한다.
+     */
     @Transactional
     fun updateOnHand(userId: Long, productId: Long, skuId: Long, onHand: Int): Sku {
         getProduct(userId, productId) // Tenant 소유 검증
         val sku = skuRepository.findByIdAndProductId(skuId, productId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "SKU를 찾을 수 없습니다.")
-        if (onHand < sku.reserved) {
+        if (onHand < sku.reserved + sku.sold) {
             throw ResponseStatusException(
                 HttpStatus.BAD_REQUEST,
-                "이미 확보된 수량(${sku.reserved})보다 적게 설정할 수 없습니다.",
+                "입금대기 확보 수량(${sku.reserved})과 판매 확정 수량(${sku.sold})의 합보다 적게 설정할 수 없습니다.",
             )
         }
         sku.onHand = onHand

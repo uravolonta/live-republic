@@ -98,8 +98,9 @@ class Sku(
     @Column(name = "updated_at", nullable = false)
     var updatedAt: OffsetDateTime = OffsetDateTime.now(),
 ) {
+    /** VS-001 §4: Available = On Hand − Reserved − Sold. */
     val available: Int
-        get() = onHand - reserved
+        get() = onHand - reserved - sold
 }
 
 @Entity
