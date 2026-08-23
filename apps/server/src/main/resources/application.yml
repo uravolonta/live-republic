@@ -10,6 +10,9 @@ spring:
     hibernate:
       ddl-auto: validate
     open-in-view: false
+  session:
+    jdbc:
+      initialize-schema: always
 
 management:
   endpoints:
@@ -23,6 +26,8 @@ management:
 
 server:
   port: ${PORT:8080}
+  # Fly Proxy 뒤에서 https 여부와 클라이언트 정보를 올바르게 판정한다.
+  forward-headers-strategy: framework
 
 cors:
   allowed-origin-patterns: ${CORS_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,https://*.vercel.app}

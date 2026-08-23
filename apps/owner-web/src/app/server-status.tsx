@@ -2,16 +2,14 @@
 
 import { useEffect, useState } from "react";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8080";
-
-/** Preview에서 Server 연결을 확인하기 위한 상태 표시. */
+/** Preview에서 Server 연결을 확인하기 위한 상태 표시. 같은 Origin의 /api Proxy를 사용한다. */
 export function ServerStatus() {
   const [status, setStatus] = useState<"loading" | "ok" | "unreachable">(
     "loading",
   );
 
   useEffect(() => {
-    fetch(`${API_URL}/api/status`)
+    fetch("/api/status")
       .then((res) => (res.ok ? res.json() : Promise.reject()))
       .then((body: { status: string }) =>
         setStatus(body.status === "ok" ? "ok" : "unreachable"),
