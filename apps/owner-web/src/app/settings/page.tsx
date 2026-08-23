@@ -9,6 +9,7 @@ import { api, type Shop } from "@/lib/api";
 export default function SettingsPage() {
   const router = useRouter();
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
   const [name, setName] = useState("");
   const [bankName, setBankName] = useState("");
   const [bankAccountNumber, setBankAccountNumber] = useState("");
@@ -30,7 +31,12 @@ export default function SettingsPage() {
         router.replace("/shop/new");
         return;
       }
-      if (res.body) {
+      if (res.status !== 200 || !res.body) {
+        setLoadError(true);
+        setLoading(false);
+        return;
+      }
+      {
         setName(res.body.name);
         setBankName(res.body.bankName ?? "");
         setBankAccountNumber(res.body.bankAccountNumber ?? "");
@@ -63,6 +69,20 @@ export default function SettingsPage() {
     setSubmitting(false);
     if (res.status === 200) setMessage("저장되었습니다.");
     else setError("저장에 실패했습니다. 입력값을 확인하세요.");
+  }
+
+  if (loadError) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-8">
+        <p className="text-sm text-red-600">설정을 불러오지 못했습니다.</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="rounded border px-4 py-2 text-sm"
+        >
+          다시 시도
+        </button>
+      </main>
+    );
   }
 
   if (loading) {

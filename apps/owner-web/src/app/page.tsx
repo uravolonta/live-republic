@@ -12,11 +12,17 @@ export default function Home() {
   const [me, setMe] = useState<Me | null>(null);
   const [shop, setShop] = useState<Shop | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(false);
 
   useEffect(() => {
     (async () => {
       const meRes = await api<Me>("/api/auth/me");
-      if (meRes.status === 401 || !meRes.body) {
+      if (meRes.status === 0) {
+        setLoadError(true);
+        setLoading(false);
+        return;
+      }
+      if (meRes.status !== 200 || !meRes.body) {
         router.replace("/login");
         return;
       }
@@ -26,6 +32,11 @@ export default function Home() {
         return;
       }
       const shopRes = await api<Shop>("/api/shops/my");
+      if (shopRes.status !== 200 || !shopRes.body) {
+        setLoadError(true);
+        setLoading(false);
+        return;
+      }
       setShop(shopRes.body);
       setLoading(false);
     })();
@@ -35,6 +46,20 @@ export default function Home() {
     await api("/api/auth/logout", { method: "POST" });
     router.replace("/login");
   }, [router]);
+
+  if (loadError) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-8">
+        <p className="text-sm text-red-600">정보를 불러오지 못했습니다.</p>
+        <button
+          onClick={() => window.location.reload()}
+          className="rounded border px-4 py-2 text-sm"
+        >
+          다시 시도
+        </button>
+      </main>
+    );
+  }
 
   if (loading || !me || !shop) {
     return <main className="p-8 text-sm text-gray-500">불러오는 중…</main>;

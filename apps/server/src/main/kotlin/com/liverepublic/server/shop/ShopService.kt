@@ -5,6 +5,7 @@ import com.liverepublic.server.tenant.MembershipRepository
 import com.liverepublic.server.tenant.MembershipRole
 import com.liverepublic.server.tenant.Tenant
 import com.liverepublic.server.tenant.TenantRepository
+import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -18,16 +19,24 @@ class ShopService(
     private val shopRepository: ShopRepository,
 ) {
 
-    /** Tenant, Shop과 Owner Membership을 한 Transaction으로 생성한다. 이 Slice에서는 1 Tenant = 1 Shop. */
+    /**
+     * Tenant, Shop과 Owner Membership을 한 Transaction으로 생성한다. 이 Slice에서는 1 Tenant = 1 Shop.
+     * 동시 요청은 membership의 부분 유일 Index(uq_membership_owner_per_user)가 최종 판정한다.
+     */
     @Transactional
     fun createShop(userId: Long, name: String): Shop {
         if (membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER) != null) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "이미 운영 중인 Shop이 있습니다.")
         }
         val tenant = tenantRepository.save(Tenant())
-        membershipRepository.save(
-            Membership(userId = userId, tenantId = tenant.id!!, role = MembershipRole.OWNER),
-        )
+        try {
+            // flush로 유일 제약을 이 지점에서 검증해 Commit 시점 예외 누출을 막는다.
+            membershipRepository.saveAndFlush(
+                Membership(userId = userId, tenantId = tenant.id!!, role = MembershipRole.OWNER),
+            )
+        } catch (e: DataIntegrityViolationException) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, "이미 운영 중인 Shop이 있습니다.")
+        }
         return shopRepository.save(Shop(tenantId = tenant.id!!, name = name))
     }
 

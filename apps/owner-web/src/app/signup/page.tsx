@@ -23,8 +23,13 @@ export default function SignupPage() {
     });
     if (res.status === 201) {
       // 가입 직후 자동 로그인하고 Shop 생성으로 이동한다.
-      await api("/api/auth/login", { method: "POST", json: { email, password } });
-      router.replace("/shop/new");
+      const loginRes = await api("/api/auth/login", { method: "POST", json: { email, password } });
+      if (loginRes.status === 200) {
+        router.replace("/shop/new");
+      } else {
+        // 가입은 완료됐으므로 수동 로그인으로 안내한다.
+        router.replace("/login");
+      }
       return;
     }
     setSubmitting(false);
