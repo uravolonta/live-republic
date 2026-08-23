@@ -23,3 +23,6 @@ management:
 
 server:
   port: ${PORT:8080}
+
+cors:
+  allowed-origin-patterns: ${CORS_ALLOWED_ORIGIN_PATTERNS:http://localhost:3000,https://*.vercel.app}
