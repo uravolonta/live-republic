@@ -38,3 +38,20 @@ export type Shop = {
   courierName: string | null;
   baseShippingFee: number | null;
 };
+
+export type Sku = {
+  id: number;
+  optionLabel: string;
+  onHand: number;
+  reserved: number;
+  sold: number;
+  available: number;
+};
+
+export type Product = {
+  id: number;
+  name: string;
+  price: number;
+  description: string | null;
+  skus: Sku[];
+};
