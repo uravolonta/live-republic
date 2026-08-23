@@ -25,7 +25,8 @@ data class CreateProductRequest(
     @field:NotBlank @field:Size(max = 200) val name: String,
     @field:Min(0) val price: Int,
     @field:Size(max = 2000) val description: String? = null,
-    val optionGroups: List<OptionGroupRequest> = emptyList(),
+    // @Valid가 있어야 중첩된 OptionGroupRequest의 제약이 실행된다.
+    @field:Valid val optionGroups: List<OptionGroupRequest> = emptyList(),
 )
 
 data class UpdateProductRequest(

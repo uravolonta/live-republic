@@ -142,8 +142,8 @@ export default function NewProductPage() {
             </button>
           )}
           <p className="text-xs text-gray-500">
-            Option 조합마다 SKU가 만들어지고 SKU별로 재고를 관리합니다. 등록 후 Option 구조는
-            변경할 수 없습니다.
+            Option 조합마다 SKU가 만들어지고 SKU별로 재고를 관리합니다 (상품당 최대 100개
+            조합). Option 이름에는 &apos;/&apos;와 &apos;,&apos;를 쓸 수 없습니다.
           </p>
         </fieldset>
 

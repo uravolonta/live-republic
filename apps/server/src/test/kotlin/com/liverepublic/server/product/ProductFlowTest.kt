@@ -151,6 +151,29 @@ class ProductFlowTest {
             post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
                 .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상","options":["빨강","빨강"]}]}"""),
         ).andExpect(status().isBadRequest)
+
+        // 50자를 넘는 그룹 이름은 DB 저장 실패(500)가 아니라 400으로 거절된다.
+        val longName = "가".repeat(51)
+        mockMvc.perform(
+            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"$longName","options":["빨강"]}]}"""),
+        ).andExpect(status().isBadRequest)
+
+        // Option 이름의 '/'는 조합 표시 이름 충돌을 만들므로 거절된다.
+        mockMvc.perform(
+            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상","options":["A / B"]}]}"""),
+        ).andExpect(status().isBadRequest)
+
+        // 조합 폭발 방지: 5 x 5 x 5 = 125 > 100 → 400
+        val five = """["1","2","3","4","5"]"""
+        mockMvc.perform(
+            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content(
+                    """{"name":"불량","price":1000,"optionGroups":[
+                       {"name":"a","options":$five},{"name":"b","options":$five},{"name":"c","options":$five}]}""",
+                ),
+        ).andExpect(status().isBadRequest)
     }
 
     @Test

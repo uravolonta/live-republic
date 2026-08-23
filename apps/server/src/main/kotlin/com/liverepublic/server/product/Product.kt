@@ -9,7 +9,10 @@ import jakarta.persistence.Table
 import org.springframework.data.jpa.repository.JpaRepository
 import java.time.OffsetDateTime
 
-/** Seller가 판매하는 상품. 가격은 상품 단위이며 Option 추가금은 이 Slice에 없다. */
+/**
+ * Seller가 판매하는 상품. 가격은 상품 단위이며 Option 추가금은 이 Slice에 없다.
+ * 커머스 도메인 엔티티는 Shop을 참조한다 (Tenant는 계정·Membership 격리 경계).
+ */
 @Entity
 @Table(name = "product")
 class Product(
@@ -17,8 +20,8 @@ class Product(
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     val id: Long? = null,
 
-    @Column(name = "tenant_id", nullable = false)
-    val tenantId: Long,
+    @Column(name = "shop_id", nullable = false)
+    val shopId: Long,
 
     @Column(nullable = false)
     var name: String,
@@ -122,8 +125,8 @@ data class SkuOptionId(
 ) : java.io.Serializable
 
 interface ProductRepository : JpaRepository<Product, Long> {
-    fun findAllByTenantIdOrderByIdDesc(tenantId: Long): List<Product>
-    fun findByIdAndTenantId(id: Long, tenantId: Long): Product?
+    fun findAllByShopIdOrderByIdDesc(shopId: Long): List<Product>
+    fun findByIdAndShopId(id: Long, shopId: Long): Product?
 }
 
 interface ProductOptionGroupRepository : JpaRepository<ProductOptionGroup, Long> {
