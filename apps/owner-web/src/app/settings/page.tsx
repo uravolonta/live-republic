@@ -67,8 +67,16 @@ export default function SettingsPage() {
       },
     });
     setSubmitting(false);
-    if (res.status === 200) setMessage("저장되었습니다.");
-    else setError("저장에 실패했습니다. 입력값을 확인하세요.");
+    if (res.status === 200) {
+      setMessage("저장되었습니다.");
+    } else if (res.status === 401) {
+      // 세션 만료: 재시도해도 성공할 수 없으므로 로그인으로 안내한다.
+      router.replace("/login");
+    } else if (res.status === 400) {
+      setError("저장에 실패했습니다. 입력값을 확인하세요.");
+    } else {
+      setError("일시적인 오류로 저장하지 못했습니다. 잠시 후 다시 시도하세요.");
+    }
   }
 
   if (loadError) {
