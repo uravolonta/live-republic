@@ -46,6 +46,7 @@ class ProductExcelService(private val productService: ProductService) {
             "재고",
         )
         const val MAX_ROWS = 1000
+        const val SHEET_NAME = "상품"
     }
 
     /** 작성 양식 시트와 예시 시트를 담은 템플릿을 만든다. */
@@ -118,7 +119,9 @@ class ProductExcelService(private val productService: ProductService) {
         }
         if (errors.isNotEmpty()) throw ExcelValidationException(errors.sortedBy { it.row })
 
-        // 등록: 상품 구조 생성(조합 SKU 자동 생성) 후 행별 재고 설정
+        // 등록: 한 행 = 한 SKU — 파일에 있는 조합만 생성한다 (Cartesian 아님).
+        // Owner 검증은 한 번만 수행하고, 재고는 SKU 생성 시점에 함께 설정한다.
+        val shopId = productService.ownerShopId(userId)
         var createdProducts = 0
         var createdSkus = 0
         validProducts.forEach { (name, first, productRows) ->
@@ -130,32 +133,25 @@ class ProductExcelService(private val productService: ProductService) {
                         .distinct(),
                 )
             }
-            val productId = try {
-                productService.createProduct(
-                    userId = userId,
+            val skus = productRows.map { row ->
+                NewSkuSpec(optionNames = row.options.map { it.second }, onHand = row.onHand)
+            }
+            try {
+                productService.createProductWithSkus(
+                    shopId = shopId,
                     name = name,
                     price = first.price,
                     description = first.description,
                     optionGroups = optionGroups,
+                    skus = skus,
                 )
             } catch (e: org.springframework.web.server.ResponseStatusException) {
                 throw ExcelValidationException(
                     listOf(ExcelRowError(first.rowNumber, "[$name] ${e.reason ?: "등록할 수 없습니다."}")),
                 )
             }
-            val skus = productService.listSkus(productId)
             createdProducts += 1
             createdSkus += skus.size
-            productRows.forEach { row ->
-                val label = if (row.options.isEmpty()) "기본" else row.options.joinToString(" / ") { it.second }
-                val sku = skus.firstOrNull { it.optionLabel == label }
-                    ?: throw ExcelValidationException(
-                        listOf(ExcelRowError(row.rowNumber, "[$name] 옵션 조합($label)을 SKU로 만들 수 없습니다.")),
-                    )
-                if (row.onHand > 0) {
-                    productService.updateOnHand(userId, productId, sku.id!!, row.onHand)
-                }
-            }
         }
         return ExcelUploadSummary(createdProducts = createdProducts, createdSkus = createdSkus)
     }
@@ -168,7 +164,21 @@ class ProductExcelService(private val productService: ProductService) {
             throw ExcelValidationException(listOf(ExcelRowError(1, "Excel(.xlsx) 파일을 읽을 수 없습니다.")))
         }
         workbook.use {
-            val sheet = it.getSheetAt(0)
+            // 템플릿의 '상품' 시트만 해석한다. 시트·헤더가 다르면 잘못된 열 해석을 막기 위해 거절한다.
+            if (it.numberOfSheets == 0) {
+                throw ExcelValidationException(listOf(ExcelRowError(1, "시트가 없는 파일입니다. 템플릿을 사용하세요.")))
+            }
+            val sheet = it.getSheet(SHEET_NAME)
+                ?: throw ExcelValidationException(
+                    listOf(ExcelRowError(1, "'$SHEET_NAME' 시트가 없습니다. 템플릿을 내려받아 작성하세요.")),
+                )
+            val headerRow = sheet.getRow(0)
+            val actualHeaders = (0 until HEADERS.size).map { c -> formatter.formatCellValue(headerRow?.getCell(c)).trim() }
+            if (actualHeaders != HEADERS) {
+                throw ExcelValidationException(
+                    listOf(ExcelRowError(1, "1행 헤더가 템플릿과 다릅니다. 열 순서를 바꾸지 말고 템플릿을 사용하세요.")),
+                )
+            }
             if (sheet.lastRowNum > MAX_ROWS) {
                 throw ExcelValidationException(
                     listOf(ExcelRowError(1, "한 번에 최대 ${MAX_ROWS}행까지 업로드할 수 있습니다.")),
@@ -185,6 +195,14 @@ class ProductExcelService(private val productService: ProductService) {
                 val name = cells[0]
                 if (name.isEmpty()) {
                     errors += ExcelRowError(rowNumber, "상품명이 비어 있습니다.")
+                    continue
+                }
+                if (name.length > 200) {
+                    errors += ExcelRowError(rowNumber, "상품명은 200자 이하여야 합니다.")
+                    continue
+                }
+                if (cells[2].length > 2000) {
+                    errors += ExcelRowError(rowNumber, "설명은 2,000자 이하여야 합니다.")
                     continue
                 }
                 val price = cells[1].replace(",", "").toIntOrNull()

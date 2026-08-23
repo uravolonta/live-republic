@@ -99,6 +99,65 @@ class ProductExcelFlowTest {
     }
 
     @Test
+    fun `파일에 있는 조합만 SKU로 생성된다 - Cartesian 아님`() {
+        val session = ownerSession("excel-partial@test.local")
+        // 빨강/M, 파랑/L 두 행만 작성 — 빨강/L, 파랑/M은 만들어지지 않아야 한다.
+        val file = xlsx(
+            listOf(
+                listOf("자켓", "50000", "", "색상", "빨강", "사이즈", "M", "", "", "3"),
+                listOf("자켓", "50000", "", "색상", "파랑", "사이즈", "L", "", "", "2"),
+            ),
+        )
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.createdSkus").value(2))
+
+        val list = mockMvc.perform(get("/api/products").cookie(session))
+            .andReturn().response.contentAsString
+        assert(list.contains("빨강 / M") && list.contains("파랑 / L")) { list }
+        assert(!list.contains("빨강 / L") && !list.contains("파랑 / M")) { "없는 조합이 생성됨: $list" }
+    }
+
+    @Test
+    fun `시트나 헤더가 템플릿과 다르면 거절된다`() {
+        val session = ownerSession("excel-structure@test.local")
+
+        // '상품' 시트 없음
+        val wrongSheet = XSSFWorkbook().use { wb ->
+            wb.createSheet("Sheet1").createRow(0).createCell(0).setCellValue("상품명")
+            val out = ByteArrayOutputStream()
+            wb.write(out)
+            MockMultipartFile("file", "wrong.xlsx", "application/octet-stream", out.toByteArray())
+        }
+        mockMvc.perform(multipart("/api/products/excel").file(wrongSheet).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("시트")))
+
+        // 헤더 열 순서 변경
+        val wrongHeader = XSSFWorkbook().use { wb ->
+            val sheet = wb.createSheet("상품")
+            val header = sheet.createRow(0)
+            listOf("가격", "상품명").forEachIndexed { i, v -> header.createCell(i).setCellValue(v) }
+            val out = ByteArrayOutputStream()
+            wb.write(out)
+            MockMultipartFile("file", "wrong2.xlsx", "application/octet-stream", out.toByteArray())
+        }
+        mockMvc.perform(multipart("/api/products/excel").file(wrongHeader).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("헤더")))
+    }
+
+    @Test
+    fun `상품명과 설명 길이 제한이 화면 등록과 동일하게 적용된다`() {
+        val session = ownerSession("excel-length@test.local")
+        val longName = "가".repeat(201)
+        val file = xlsx(listOf(listOf(longName, "1000", "", "", "", "", "", "", "", "1")))
+        mockMvc.perform(multipart("/api/products/excel").file(file).cookie(session))
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.errors[0].message").value(org.hamcrest.Matchers.containsString("200자")))
+    }
+
+    @Test
     fun `오류 행이 있으면 아무것도 등록되지 않고 행별 이유를 반환한다`() {
         val session = ownerSession("excel-invalid@test.local")
         val file = xlsx(
