@@ -1,0 +1,4 @@
+build/
+.gradle/
+compose.yaml
+Dockerfile
