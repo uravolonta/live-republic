@@ -57,7 +57,7 @@ export type LiveSummary = {
   title: string;
   status: "SCHEDULED" | "CANCELLED";
   scheduledStartAt: string;
-  streamerName: string | null;
+  thumbnailUrl: string | null;
   productCount: number;
   ready: boolean;
 };
@@ -67,7 +67,7 @@ export type LiveDetail = {
   title: string;
   status: "SCHEDULED" | "CANCELLED";
   scheduledStartAt: string;
-  streamer: { userId: number; name: string; loginId: string } | null;
+  thumbnailUrl: string | null;
   products: { productId: number; name: string; price: number; position: number }[];
   ready: boolean;
   notReadyReasons: string[];

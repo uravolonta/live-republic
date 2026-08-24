@@ -67,19 +67,29 @@ export default function LivesPage() {
             <li key={live.id}>
               <Link
                 href={`/lives/${live.id}`}
-                className="flex items-center justify-between rounded-lg border p-4"
+                className="flex items-center justify-between gap-3 rounded-lg border p-4"
               >
-                <div>
-                  <p className="font-semibold">
-                    {live.title}
-                    {live.status === "CANCELLED" && (
-                      <span className="ml-2 text-sm text-red-600">취소됨</span>
-                    )}
-                  </p>
-                  <p className="text-sm text-gray-500">
-                    {new Date(live.scheduledStartAt).toLocaleString()} ·{" "}
-                    {live.streamerName ?? "담당자 미지정"} · 상품 {live.productCount}개
-                  </p>
+                <div className="flex items-center gap-3">
+                  {live.thumbnailUrl && (
+                    /* eslint-disable-next-line @next/next/no-img-element -- 외부 URL 썸네일 */
+                    <img
+                      src={live.thumbnailUrl}
+                      alt=""
+                      className="h-12 w-12 rounded object-cover"
+                    />
+                  )}
+                  <div>
+                    <p className="font-semibold">
+                      {live.title}
+                      {live.status === "CANCELLED" && (
+                        <span className="ml-2 text-sm text-red-600">취소됨</span>
+                      )}
+                    </p>
+                    <p className="text-sm text-gray-500">
+                      {new Date(live.scheduledStartAt).toLocaleString()} · 상품{" "}
+                      {live.productCount}개
+                    </p>
+                  </div>
                 </div>
                 {live.status === "SCHEDULED" && (
                   <span className={`text-sm ${live.ready ? "text-green-600" : "text-amber-600"}`}>

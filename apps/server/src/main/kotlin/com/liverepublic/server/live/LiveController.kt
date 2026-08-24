@@ -5,6 +5,7 @@ import com.liverepublic.server.product.ProductRepository
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
+import jakarta.validation.constraints.Pattern
 import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
@@ -21,13 +22,12 @@ import java.time.OffsetDateTime
 data class SaveLiveRequest(
     @field:NotBlank @field:Size(max = 200) val title: String,
     @field:NotNull val scheduledStartAt: OffsetDateTime,
+    @field:Size(max = 500)
+    @field:Pattern(regexp = "^https?://.*$", message = "썸네일 URL은 http(s)로 시작해야 합니다.")
+    val thumbnailUrl: String? = null,
 )
 
-data class AssignStreamerRequest(val streamerUserId: Long?)
-
 data class SetLiveProductsRequest(val productIds: List<Long> = emptyList())
-
-data class LiveStreamerInfo(val userId: Long, val name: String, val loginId: String)
 
 data class LiveProductInfo(
     val productId: Long,
@@ -41,7 +41,7 @@ data class LiveDetailResponse(
     val title: String,
     val status: LiveStatus,
     val scheduledStartAt: OffsetDateTime,
-    val streamer: LiveStreamerInfo?,
+    val thumbnailUrl: String?,
     val products: List<LiveProductInfo>,
     val ready: Boolean,
     val notReadyReasons: List<String>,
@@ -52,7 +52,7 @@ data class LiveSummaryResponse(
     val title: String,
     val status: LiveStatus,
     val scheduledStartAt: OffsetDateTime,
-    val streamerName: String?,
+    val thumbnailUrl: String?,
     val productCount: Int,
     val ready: Boolean,
 )
@@ -70,8 +70,11 @@ class LiveController(
         @AuthenticationPrincipal user: AuthUser,
         @Valid @RequestBody request: SaveLiveRequest,
     ): LiveDetailResponse {
-        val live = liveService.createLive(user.id, request.title.trim(), request.scheduledStartAt)
-        return detail(user, live.id!!)
+        val live = liveService.createLive(
+            user.id, request.title.trim(), request.scheduledStartAt,
+            request.thumbnailUrl?.trim()?.ifEmpty { null },
+        )
+        return toDetail(live)
     }
 
     @GetMapping
@@ -85,9 +88,9 @@ class LiveController(
                 title = live.title,
                 status = live.status,
                 scheduledStartAt = live.scheduledStartAt,
-                streamerName = liveService.streamerInfo(live.streamerUserId)?.first,
+                thumbnailUrl = live.thumbnailUrl,
                 productCount = productCount,
-                ready = liveService.notReadyReasons(live, productCount).isEmpty(),
+                ready = liveService.notReadyReasons(productCount).isEmpty(),
             )
         }
     }
@@ -96,25 +99,19 @@ class LiveController(
     fun detail(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): LiveDetailResponse {
-        val live = liveService.getLive(user.id, liveId)
-        return toDetail(live)
-    }
+    ): LiveDetailResponse = toDetail(liveService.getLive(user.id, liveId))
 
     @PutMapping("/{liveId}")
     fun update(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
         @Valid @RequestBody request: SaveLiveRequest,
-    ): LiveDetailResponse =
-        toDetail(liveService.updateLive(user.id, liveId, request.title.trim(), request.scheduledStartAt))
-
-    @PutMapping("/{liveId}/streamer")
-    fun assignStreamer(
-        @AuthenticationPrincipal user: AuthUser,
-        @PathVariable liveId: Long,
-        @RequestBody request: AssignStreamerRequest,
-    ): LiveDetailResponse = toDetail(liveService.assignStreamer(user.id, liveId, request.streamerUserId))
+    ): LiveDetailResponse = toDetail(
+        liveService.updateLive(
+            user.id, liveId, request.title.trim(), request.scheduledStartAt,
+            request.thumbnailUrl?.trim()?.ifEmpty { null },
+        ),
+    )
 
     @PutMapping("/{liveId}/products")
     fun setProducts(
@@ -142,16 +139,13 @@ class LiveController(
                 )
             }
         }
-        val streamer = liveService.streamerInfo(live.streamerUserId)
-        val notReadyReasons = liveService.notReadyReasons(live, productInfos.size)
+        val notReadyReasons = liveService.notReadyReasons(productInfos.size)
         return LiveDetailResponse(
             id = live.id!!,
             title = live.title,
             status = live.status,
             scheduledStartAt = live.scheduledStartAt,
-            streamer = streamer?.let {
-                LiveStreamerInfo(userId = live.streamerUserId!!, name = it.first, loginId = it.second)
-            },
+            thumbnailUrl = live.thumbnailUrl,
             products = productInfos,
             ready = notReadyReasons.isEmpty(),
             notReadyReasons = notReadyReasons,

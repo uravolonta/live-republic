@@ -81,6 +81,10 @@ class AuthService(
                 "비밀번호는 8자 이상의 영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다.",
             )
         }
+        // 임시 비밀번호를 그대로 유지하며 변경 강제를 우회하는 것을 막는다.
+        if (newPassword == currentPassword) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "새 비밀번호는 현재 비밀번호와 달라야 합니다.")
+        }
         val user = userAccountRepository.findById(userId)
             .orElseThrow { ResponseStatusException(HttpStatus.UNAUTHORIZED, "사용자를 찾을 수 없습니다.") }
         if (!passwordEncoder.matches(currentPassword, user.passwordHash)) {

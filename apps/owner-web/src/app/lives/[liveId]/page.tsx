@@ -3,14 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import Link from "next/link";
-import {
-  api,
-  errorMessage,
-  type LiveDetail,
-  type Me,
-  type Product,
-  type Streamer,
-} from "@/lib/api";
+import { api, errorMessage, type LiveDetail, type Product } from "@/lib/api";
 
 /** 로컬 datetime-local 입력값으로 변환. */
 function toLocalInput(iso: string): string {
@@ -19,30 +12,27 @@ function toLocalInput(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-/** 예정 Live 상세 — 정보 수정, 담당자·상품 연결, 준비 상태 확인, 취소. */
+/** 예정 Live 상세 — 정보·썸네일 수정, 상품 연결·순서, 준비 상태 확인, 취소. */
 export default function LiveDetailPage() {
   const router = useRouter();
   const params = useParams<{ liveId: string }>();
   const liveId = params.liveId;
 
   const [live, setLive] = useState<LiveDetail | null>(null);
-  const [me, setMe] = useState<Me | null>(null);
-  const [streamers, setStreamers] = useState<Streamer[]>([]);
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [loadError, setLoadError] = useState(false);
 
   const [title, setTitle] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
+  const [thumbnailUrl, setThumbnailUrl] = useState("");
   const [selectedProductIds, setSelectedProductIds] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [liveRes, meRes, streamerRes, productRes] = await Promise.all([
+    const [liveRes, productRes] = await Promise.all([
       api<LiveDetail>(`/api/lives/${liveId}`),
-      api<Me>("/api/auth/me"),
-      api<Streamer[]>("/api/streamers"),
       api<Product[]>("/api/products"),
     ]);
     if (liveRes.status === 401) {
@@ -53,16 +43,15 @@ export default function LiveDetailPage() {
       router.replace("/lives");
       return;
     }
-    if (liveRes.status !== 200 || !liveRes.body || !meRes.body) {
+    if (liveRes.status !== 200 || !liveRes.body) {
       setLoadError(true);
       return;
     }
     setLive(liveRes.body);
-    setMe(meRes.body);
-    setStreamers(streamerRes.body ?? []);
     setAllProducts(productRes.body ?? []);
     setTitle(liveRes.body.title);
     setScheduledAt(toLocalInput(liveRes.body.scheduledStartAt));
+    setThumbnailUrl(liveRes.body.thumbnailUrl ?? "");
     setSelectedProductIds(liveRes.body.products.map((p) => p.productId));
   }, [liveId, router]);
 
@@ -74,6 +63,7 @@ export default function LiveDetailPage() {
     setBusy(false);
     if (res.status === 200 && res.body) {
       setLive(res.body);
+      setThumbnailUrl(res.body.thumbnailUrl ?? "");
       setSelectedProductIds(res.body.products.map((p) => p.productId));
       setMessage(okMessage);
     } else if (res.status === 401) {
@@ -95,22 +85,13 @@ export default function LiveDetailPage() {
     handleMutation(
       await api<LiveDetail>(`/api/lives/${liveId}`, {
         method: "PUT",
-        json: { title, scheduledStartAt: new Date(scheduledAt).toISOString() },
+        json: {
+          title,
+          scheduledStartAt: new Date(scheduledAt).toISOString(),
+          thumbnailUrl: thumbnailUrl.trim() === "" ? null : thumbnailUrl.trim(),
+        },
       }),
       "예정 정보가 저장되었습니다.",
-    );
-  }
-
-  async function assignStreamer(value: string) {
-    setMessage(null);
-    setError(null);
-    setBusy(true);
-    handleMutation(
-      await api<LiveDetail>(`/api/lives/${liveId}/streamer`, {
-        method: "PUT",
-        json: { streamerUserId: value === "" ? null : Number(value) },
-      }),
-      "담당자가 변경되었습니다.",
     );
   }
 
@@ -157,7 +138,7 @@ export default function LiveDetailPage() {
     );
   }
 
-  if (!live || !me) {
+  if (!live) {
     return <main className="p-8 text-sm text-gray-500">불러오는 중…</main>;
   }
 
@@ -218,6 +199,23 @@ export default function LiveDetailPage() {
           disabled={cancelled}
           className="rounded border p-2 disabled:opacity-60"
         />
+        <input
+          type="url"
+          maxLength={500}
+          placeholder="썸네일 URL (선택, http(s)://…)"
+          value={thumbnailUrl}
+          onChange={(e) => setThumbnailUrl(e.target.value)}
+          disabled={cancelled}
+          className="rounded border p-2 disabled:opacity-60"
+        />
+        {live.thumbnailUrl && (
+          /* eslint-disable-next-line @next/next/no-img-element -- 외부 URL 썸네일 */
+          <img
+            src={live.thumbnailUrl}
+            alt="Live 썸네일"
+            className="h-32 w-32 rounded object-cover"
+          />
+        )}
         {!cancelled && (
           <button
             type="submit"
@@ -228,30 +226,6 @@ export default function LiveDetailPage() {
           </button>
         )}
       </form>
-
-      <section className="flex flex-col gap-3 rounded-lg border p-4">
-        <h2 className="font-semibold">담당자</h2>
-        <select
-          value={live.streamer?.userId ?? ""}
-          onChange={(e) => assignStreamer(e.target.value)}
-          disabled={cancelled || busy}
-          className="rounded border p-2 disabled:opacity-60"
-        >
-          <option value="">담당자 미지정</option>
-          <option value={me.id}>{me.name} (나 · Owner)</option>
-          {streamers.map((s) => (
-            <option key={s.userId} value={s.userId}>
-              {s.name} ({s.loginId})
-            </option>
-          ))}
-        </select>
-        <p className="text-xs text-gray-500">
-          Owner 자신 또는 같은 Shop의 Streamer를 담당자로 지정할 수 있습니다.{" "}
-          <Link href="/streamers" className="underline">
-            Streamer 계정 관리
-          </Link>
-        </p>
-      </section>
 
       <section className="flex flex-col gap-3 rounded-lg border p-4">
         <h2 className="font-semibold">판매 상품 (표시 순서)</h2>

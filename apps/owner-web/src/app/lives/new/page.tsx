@@ -10,6 +10,7 @@ export default function NewLivePage() {
   const router = useRouter();
   const [title, setTitle] = useState("");
   const [scheduledAt, setScheduledAt] = useState("");
+  const [thumbnailUrl, setThumbnailUrl] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -22,6 +23,7 @@ export default function NewLivePage() {
       json: {
         title,
         scheduledStartAt: new Date(scheduledAt).toISOString(),
+        thumbnailUrl: thumbnailUrl.trim() === "" ? null : thumbnailUrl.trim(),
       },
     });
     if (res.status === 201 && res.body) {
@@ -66,6 +68,14 @@ export default function NewLivePage() {
             className="rounded border p-2"
           />
         </label>
+        <input
+          type="url"
+          maxLength={500}
+          placeholder="썸네일 URL (선택, http(s)://…)"
+          value={thumbnailUrl}
+          onChange={(e) => setThumbnailUrl(e.target.value)}
+          className="rounded border p-2"
+        />
         {error && <p className="text-sm text-red-600">{error}</p>}
         <button
           type="submit"

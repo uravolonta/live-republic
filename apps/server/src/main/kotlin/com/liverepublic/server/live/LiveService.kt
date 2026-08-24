@@ -2,10 +2,6 @@ package com.liverepublic.server.live
 
 import com.liverepublic.server.product.ProductRepository
 import com.liverepublic.server.product.ProductService
-import com.liverepublic.server.shop.ShopRepository
-import com.liverepublic.server.tenant.MembershipRepository
-import com.liverepublic.server.tenant.MembershipRole
-import com.liverepublic.server.user.UserAccountRepository
 import org.springframework.http.HttpStatus
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
@@ -16,18 +12,15 @@ import java.time.OffsetDateTime
 class LiveService(
     private val productService: ProductService,
     private val productRepository: ProductRepository,
-    private val shopRepository: ShopRepository,
-    private val membershipRepository: MembershipRepository,
-    private val userAccountRepository: UserAccountRepository,
     private val liveRepository: LiveRepository,
     private val liveProductRepository: LiveProductRepository,
 ) {
 
     @Transactional
-    fun createLive(userId: Long, title: String, scheduledStartAt: OffsetDateTime): Live {
+    fun createLive(userId: Long, title: String, scheduledStartAt: OffsetDateTime, thumbnailUrl: String?): Live {
         val shopId = productService.ownerShopId(userId)
         return liveRepository.save(
-            Live(shopId = shopId, title = title, scheduledStartAt = scheduledStartAt),
+            Live(shopId = shopId, title = title, scheduledStartAt = scheduledStartAt, thumbnailUrl = thumbnailUrl),
         )
     }
 
@@ -41,30 +34,17 @@ class LiveService(
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
 
     @Transactional
-    fun updateLive(userId: Long, liveId: Long, title: String, scheduledStartAt: OffsetDateTime): Live {
+    fun updateLive(
+        userId: Long,
+        liveId: Long,
+        title: String,
+        scheduledStartAt: OffsetDateTime,
+        thumbnailUrl: String?,
+    ): Live {
         val live = getMutableLive(userId, liveId)
         live.title = title
         live.scheduledStartAt = scheduledStartAt
-        live.updatedAt = OffsetDateTime.now()
-        return live
-    }
-
-    /** 담당자 지정: 같은 Shop의 활성 OWNER 또는 STREAMER Membership만 허용. null이면 해제. */
-    @Transactional
-    fun assignStreamer(userId: Long, liveId: Long, streamerUserId: Long?): Live {
-        val live = getMutableLive(userId, liveId)
-        if (streamerUserId != null) {
-            val tenantId = shopRepository.findById(live.shopId)
-                .orElseThrow { ResponseStatusException(HttpStatus.NOT_FOUND, "Shop을 찾을 수 없습니다.") }
-                .tenantId
-            val membership = membershipRepository.findByUserIdAndTenantId(streamerUserId, tenantId)
-            if (membership == null ||
-                (membership.role != MembershipRole.OWNER && membership.role != MembershipRole.STREAMER)
-            ) {
-                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 Shop의 Owner 또는 Streamer만 담당자로 지정할 수 있습니다.")
-            }
-        }
-        live.streamerUserId = streamerUserId
+        live.thumbnailUrl = thumbnailUrl
         live.updatedAt = OffsetDateTime.now()
         return live
     }
@@ -108,21 +88,13 @@ class LiveService(
         if (liveIds.isEmpty()) emptyMap()
         else liveProductRepository.findAllByLiveIdInOrderByPosition(liveIds).groupBy { it.liveId }
 
-    /** 담당자 표시 정보. */
-    @Transactional(readOnly = true)
-    fun streamerInfo(streamerUserId: Long?): Pair<String, String>? {
-        if (streamerUserId == null) return null
-        val user = userAccountRepository.findById(streamerUserId).orElse(null) ?: return null
-        return user.name to user.email
-    }
-
     /**
      * 방송 준비 미완료 사유 (Issue #4: 표시만, 시작 거절은 Issue #5).
+     * 실제 진행자는 방송 시작 시점(Issue #5)에 기록하므로 담당자는 준비 조건이 아니다.
      * 상품은 생성 시 SKU가 반드시 만들어지므로 SKU 유효성은 상품 존재로 판정한다.
      */
-    fun notReadyReasons(live: Live, productCount: Int): List<String> {
+    fun notReadyReasons(productCount: Int): List<String> {
         val reasons = mutableListOf<String>()
-        if (live.streamerUserId == null) reasons += "담당자가 연결되지 않았습니다."
         if (productCount == 0) reasons += "판매 상품이 연결되지 않았습니다."
         return reasons
     }

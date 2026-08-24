@@ -47,15 +47,11 @@ class ScheduledLiveFlowTest {
         return requireNotNull(result.response.getCookie("SESSION"))
     }
 
-    private fun myUserId(session: Cookie): Long =
-        mapper.readTree(
-            mockMvc.perform(get("/api/auth/me").cookie(session)).andReturn().response.contentAsString,
-        ).get("id").asLong()
-
-    private fun createLive(session: Cookie, title: String): Long {
+    private fun createLive(session: Cookie, title: String, thumbnailUrl: String? = null): Long {
+        val thumbnail = thumbnailUrl?.let { ""","thumbnailUrl":"$it"""" } ?: ""
         val result = mockMvc.perform(
             post("/api/lives").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"title":"$title","scheduledStartAt":"2027-01-15T20:00:00+09:00"}"""),
+                .content("""{"title":"$title","scheduledStartAt":"2027-01-15T20:00:00+09:00"$thumbnail}"""),
         ).andExpect(status().isCreated).andReturn()
         return mapper.readTree(result.response.contentAsString).get("id").asLong()
     }
@@ -69,28 +65,27 @@ class ScheduledLiveFlowTest {
     }
 
     @Test
-    fun `예정 Live를 여러 개 만들고 Owner 자신을 담당자로 지정한다`() {
+    fun `예정 Live를 여러 개 만들고 썸네일 URL이 보존된다`() {
         val session = ownerSession("live-owner@test.local")
-        val ownerId = myUserId(session)
-        val live1 = createLive(session, "첫 방송")
+        val live1 = createLive(session, "첫 방송", "https://cdn.example.com/live1.jpg")
         createLive(session, "둘째 방송")
 
         mockMvc.perform(get("/api/lives").cookie(session))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.length()").value(2))
 
-        // Streamer·상품 없는 예정 Live도 저장되고 준비 미완료 사유가 표시된다.
+        // 상품 없는 예정 Live도 저장되고 준비 미완료 사유가 표시된다. 썸네일 URL 왕복 확인.
         mockMvc.perform(get("/api/lives/$live1").cookie(session))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.ready").value(false))
-            .andExpect(jsonPath("$.notReadyReasons.length()").value(2))
+            .andExpect(jsonPath("$.notReadyReasons.length()").value(1))
+            .andExpect(jsonPath("$.thumbnailUrl").value("https://cdn.example.com/live1.jpg"))
 
-        // Owner 자신을 담당자로 지정한다 (STREAMER Membership 불필요).
+        // http(s)가 아닌 썸네일 URL은 거절된다.
         mockMvc.perform(
-            put("/api/lives/$live1/streamer").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"streamerUserId":$ownerId}"""),
-        ).andExpect(status().isOk)
-            .andExpect(jsonPath("$.streamer.userId").value(ownerId))
+            post("/api/lives").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"title":"불량","scheduledStartAt":"2027-01-15T20:00:00+09:00","thumbnailUrl":"javascript:alert(1)"}"""),
+        ).andExpect(status().isBadRequest)
     }
 
     @Test
@@ -113,7 +108,13 @@ class ScheduledLiveFlowTest {
         mockMvc.perform(get("/api/lives").cookie(streamerSession))
             .andExpect(status().isForbidden)
 
-        // 비밀번호 변경 후에는 제한이 풀리고 새 비밀번호로 로그인된다.
+        // 임시 비밀번호를 그대로 새 비밀번호로 쓸 수 없다.
+        mockMvc.perform(
+            post("/api/auth/password").cookie(streamerSession).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"currentPassword":"temp-pass-123","newPassword":"temp-pass-123"}"""),
+        ).andExpect(status().isBadRequest)
+
+        // 다른 비밀번호로 변경하면 제한이 풀리고 새 비밀번호로 로그인된다.
         mockMvc.perform(
             post("/api/auth/password").cookie(streamerSession).contentType(MediaType.APPLICATION_JSON)
                 .content("""{"currentPassword":"temp-pass-123","newPassword":"my-new-pass-456"}"""),
@@ -122,34 +123,23 @@ class ScheduledLiveFlowTest {
         mockMvc.perform(get("/api/auth/me").cookie(streamerSession))
             .andExpect(jsonPath("$.mustChangePassword").value(false))
         login("streamer-one", "my-new-pass-456")
-
-        // 같은 Shop의 Streamer를 담당자로 연결할 수 있다.
-        val streamers = mapper.readTree(
-            mockMvc.perform(get("/api/streamers").cookie(session)).andReturn().response.contentAsString,
-        )
-        val streamerUserId = streamers.get(0).get("userId").asLong()
-        val liveId = createLive(session, "서브계정 방송")
-        mockMvc.perform(
-            put("/api/lives/$liveId/streamer").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"streamerUserId":$streamerUserId}"""),
-        ).andExpect(status().isOk)
-            .andExpect(jsonPath("$.streamer.loginId").value("streamer-one"))
     }
 
     @Test
     fun `상품 두 개를 순서와 함께 연결하고 순서를 변경한다`() {
         val session = ownerSession("live-products@test.local")
-        val ownerId = myUserId(session)
         val liveId = createLive(session, "상품 방송")
         val productA = createProduct(session, "상품 A")
         val productB = createProduct(session, "상품 B")
 
+        // 상품 연결만으로 방송 준비 완료가 된다 (담당자는 준비 조건이 아니다 — 2026-08-24 결정).
         mockMvc.perform(
             put("/api/lives/$liveId/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
                 .content("""{"productIds":[$productA,$productB]}"""),
         ).andExpect(status().isOk)
             .andExpect(jsonPath("$.products[0].name").value("상품 A"))
             .andExpect(jsonPath("$.products[1].name").value("상품 B"))
+            .andExpect(jsonPath("$.ready").value(true))
 
         // 순서 변경 후 조회에서도 유지된다.
         mockMvc.perform(
@@ -159,12 +149,6 @@ class ScheduledLiveFlowTest {
         mockMvc.perform(get("/api/lives/$liveId").cookie(session))
             .andExpect(jsonPath("$.products[0].name").value("상품 B"))
             .andExpect(jsonPath("$.products[1].name").value("상품 A"))
-
-        // 담당자 + 상품 연결 → 준비 완료
-        mockMvc.perform(
-            put("/api/lives/$liveId/streamer").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"streamerUserId":$ownerId}"""),
-        ).andExpect(jsonPath("$.ready").value(true))
     }
 
     @Test
@@ -180,19 +164,12 @@ class ScheduledLiveFlowTest {
         ).andExpect(status().isBadRequest)
 
         val sessionB = ownerSession("live-b@test.local")
-        val ownerBId = myUserId(sessionB)
         val productB = createProduct(sessionB, "B의 상품")
 
         // 다른 Shop의 상품 연결 거절
         mockMvc.perform(
             put("/api/lives/$liveId/products").cookie(sessionA).contentType(MediaType.APPLICATION_JSON)
                 .content("""{"productIds":[$productB]}"""),
-        ).andExpect(status().isBadRequest)
-
-        // 다른 Shop의 사용자(B의 Owner)를 담당자로 지정 거절
-        mockMvc.perform(
-            put("/api/lives/$liveId/streamer").cookie(sessionA).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"streamerUserId":$ownerBId}"""),
         ).andExpect(status().isBadRequest)
 
         // 다른 Shop의 Live 접근 거절

@@ -40,9 +40,9 @@ class Live(
     @Column(name = "scheduled_start_at", nullable = false)
     var scheduledStartAt: OffsetDateTime,
 
-    /** Live 담당자: 같은 Shop의 활성 OWNER 또는 STREAMER. 연결 전에는 null. */
-    @Column(name = "streamer_user_id")
-    var streamerUserId: Long? = null,
+    /** 썸네일 URL (선택). 이미지 업로드 인프라는 별도 티켓. */
+    @Column(name = "thumbnail_url")
+    var thumbnailUrl: String? = null,
 
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     val createdAt: OffsetDateTime? = null,
