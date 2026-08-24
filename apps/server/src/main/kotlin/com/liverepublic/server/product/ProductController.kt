@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.Size
 import org.springframework.http.HttpStatus
 import org.springframework.security.core.annotation.AuthenticationPrincipal
+import org.springframework.web.bind.annotation.DeleteMapping
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
@@ -39,6 +40,10 @@ data class UpdateOnHandRequest(
     @field:Min(0) val onHand: Int,
 )
 
+data class ReplaceOptionsRequest(
+    @field:Valid val optionGroups: List<OptionGroupRequest> = emptyList(),
+)
+
 data class SkuResponse(
     val id: Long,
     val optionLabel: String,
@@ -59,20 +64,25 @@ data class SkuResponse(
     }
 }
 
+data class OptionGroupInfo(val name: String, val options: List<String>)
+
 data class ProductResponse(
     val id: Long,
     val name: String,
     val price: Int,
     val description: String?,
     val skus: List<SkuResponse>,
+    /** 상세 조회에만 포함 (목록은 null). 구조 변경 폼 prefill용. */
+    val optionGroups: List<OptionGroupInfo>? = null,
 ) {
     companion object {
-        fun from(product: Product, skus: List<Sku>) = ProductResponse(
+        fun from(product: Product, skus: List<Sku>, optionGroups: List<OptionGroupInfo>? = null) = ProductResponse(
             id = product.id!!,
             name = product.name,
             price = product.price,
             description = product.description,
             skus = skus.map(SkuResponse::from),
+            optionGroups = optionGroups,
         )
     }
 }
@@ -112,7 +122,11 @@ class ProductController(private val productService: ProductService) {
         @PathVariable productId: Long,
     ): ProductResponse {
         val product = productService.getProduct(user.id, productId)
-        return ProductResponse.from(product, productService.listSkus(productId))
+        return ProductResponse.from(
+            product,
+            productService.listSkus(productId),
+            productService.listOptionStructure(productId).map { OptionGroupInfo(it.name, it.options) },
+        )
     }
 
     @PutMapping("/{productId}")
@@ -127,6 +141,29 @@ class ProductController(private val productService: ProductService) {
             name = request.name.trim(),
             price = request.price,
             description = request.description?.trim()?.ifEmpty { null },
+        )
+        return get(user, productId)
+    }
+
+    @DeleteMapping("/{productId}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    fun delete(
+        @AuthenticationPrincipal user: AuthUser,
+        @PathVariable productId: Long,
+    ) = productService.deleteProduct(user.id, productId)
+
+    @PutMapping("/{productId}/options")
+    fun replaceOptions(
+        @AuthenticationPrincipal user: AuthUser,
+        @PathVariable productId: Long,
+        @Valid @RequestBody request: ReplaceOptionsRequest,
+    ): ProductResponse {
+        productService.replaceOptionStructure(
+            userId = user.id,
+            productId = productId,
+            optionGroups = request.optionGroups.map { group ->
+                NewOptionGroup(name = group.name.trim(), options = group.options.map { it.trim() })
+            },
         )
         return get(user, productId)
     }

@@ -81,8 +81,14 @@ class LiveController(
     fun list(@AuthenticationPrincipal user: AuthUser): List<LiveSummaryResponse> {
         val lives = liveService.listLives(user.id)
         val productsByLive = liveService.listLiveProductsByLives(lives.mapNotNull { it.id })
+        // 삭제된 상품은 판매 화면에서 숨기므로 상품 수·준비 상태에서도 제외한다.
+        val activeProductIds = productRepository
+            .findAllById(productsByLive.values.flatten().map { it.productId }.distinct())
+            .filter { it.deletedAt == null }
+            .mapNotNull { it.id }
+            .toSet()
         return lives.map { live ->
-            val productCount = productsByLive[live.id]?.size ?: 0
+            val productCount = productsByLive[live.id]?.count { it.productId in activeProductIds } ?: 0
             LiveSummaryResponse(
                 id = live.id!!,
                 title = live.title,
@@ -128,7 +134,10 @@ class LiveController(
 
     private fun toDetail(live: Live): LiveDetailResponse {
         val liveProducts = liveService.listLiveProducts(live.id!!)
-        val products = productRepository.findAllById(liveProducts.map { it.productId }).associateBy { it.id }
+        // 삭제된 상품은 라인업 표시·준비 상태에서 제외한다.
+        val products = productRepository.findAllById(liveProducts.map { it.productId })
+            .filter { it.deletedAt == null }
+            .associateBy { it.id }
         val productInfos = liveProducts.mapNotNull { lp ->
             products[lp.productId]?.let { product ->
                 LiveProductInfo(

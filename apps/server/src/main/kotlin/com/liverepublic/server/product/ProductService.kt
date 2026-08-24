@@ -133,20 +133,135 @@ class ProductService(
 
     @Transactional(readOnly = true)
     fun listProducts(userId: Long): List<Product> =
-        productRepository.findAllByShopIdOrderByIdDesc(ownerShopId(userId))
+        productRepository.findAllByShopIdAndDeletedAtIsNullOrderByIdDesc(ownerShopId(userId))
 
     @Transactional(readOnly = true)
     fun getProduct(userId: Long, productId: Long): Product =
-        productRepository.findByIdAndShopId(productId, ownerShopId(userId))
+        productRepository.findByIdAndShopIdAndDeletedAtIsNull(productId, ownerShopId(userId))
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "상품을 찾을 수 없습니다.")
 
+    /** 보관(archive)되지 않은 판매 중 SKU 목록. */
     @Transactional(readOnly = true)
-    fun listSkus(productId: Long): List<Sku> = skuRepository.findAllByProductIdOrderById(productId)
+    fun listSkus(productId: Long): List<Sku> =
+        skuRepository.findAllByProductIdAndArchivedAtIsNullOrderById(productId)
 
     @Transactional(readOnly = true)
     fun listSkusByProducts(productIds: List<Long>): Map<Long, List<Sku>> =
         if (productIds.isEmpty()) emptyMap()
-        else skuRepository.findAllByProductIdInOrderById(productIds).groupBy { it.productId }
+        else skuRepository.findAllByProductIdInAndArchivedAtIsNullOrderById(productIds).groupBy { it.productId }
+
+    /**
+     * 상품 soft delete — 목록·판매 화면에서 숨기고 데이터는 보존해 이력이 깨지지 않게 한다.
+     * 확보(Reserved) 수량이 남은 SKU가 있으면 미입금 주문이 걸려 있으므로 거절한다.
+     */
+    @Transactional
+    fun deleteProduct(userId: Long, productId: Long) {
+        val product = getProduct(userId, productId)
+        val reservedSku = skuRepository.findAllByProductIdOrderById(productId).firstOrNull { it.reserved > 0 }
+        if (reservedSku != null) {
+            throw ResponseStatusException(
+                HttpStatus.CONFLICT,
+                "확보(입금대기) 수량이 남은 SKU(${reservedSku.optionLabel})가 있어 삭제할 수 없습니다.",
+            )
+        }
+        product.deletedAt = OffsetDateTime.now()
+        product.updatedAt = OffsetDateTime.now()
+    }
+
+    /**
+     * Option 구조를 교체하고 SKU를 재계산한다 (새 구조의 전체 조합 기준).
+     * - 유지되는 조합: SKU와 재고 유지
+     * - 사라지는 조합: 보관(archive) — 확보(Reserved) 수량이 있으면 거절
+     * - 과거 보관됐던 같은 조합: 복원해 판매 이력(Sold) 유지
+     * - 새 조합: 재고 0의 새 SKU
+     */
+    @Transactional
+    fun replaceOptionStructure(userId: Long, productId: Long, optionGroups: List<NewOptionGroup>): Product {
+        val product = getProduct(userId, productId)
+        validateOptionGroups(optionGroups)
+
+        val newCombos: List<List<String>> =
+            optionGroups.fold(listOf(emptyList<String>())) { acc, group ->
+                acc.flatMap { combo -> group.options.map { combo + it } }
+            }
+        if (newCombos.size > MAX_SKUS_PER_PRODUCT) {
+            throw ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "Option 조합(SKU)은 상품당 최대 ${MAX_SKUS_PER_PRODUCT}개까지 가능합니다. (요청: ${newCombos.size}개)",
+            )
+        }
+        val newLabels = newCombos.map { labelOf(it) }
+
+        val allSkus = skuRepository.findAllByProductIdOrderById(productId)
+        val activeSkus = allSkus.filter { it.archivedAt == null }
+
+        // 사라지는 조합에 확보 수량이 있으면 미입금 주문이 걸려 있으므로 거절한다.
+        activeSkus.firstOrNull { it.optionLabel !in newLabels && it.reserved > 0 }?.let {
+            throw ResponseStatusException(
+                HttpStatus.CONFLICT,
+                "확보(입금대기) 수량이 남은 SKU(${it.optionLabel})는 구조 변경으로 없앨 수 없습니다.",
+            )
+        }
+
+        // 기존 Option 구조 행을 교체한다 (SKU 행은 보존).
+        skuOptionRepository.deleteAllByProductId(productId)
+        optionRepository.deleteAllByProductId(productId)
+        optionGroupRepository.deleteAllByProductId(productId)
+
+        val optionByGroupAndName = mutableMapOf<Pair<Int, String>, ProductOption>()
+        optionGroups.forEachIndexed { gi, group ->
+            val savedGroup = optionGroupRepository.save(
+                ProductOptionGroup(productId = productId, name = group.name, position = gi),
+            )
+            optionRepository.saveAll(
+                group.options.mapIndexed { oi, optionName ->
+                    ProductOption(optionGroupId = savedGroup.id!!, name = optionName, position = oi)
+                },
+            ).forEach { option -> optionByGroupAndName[gi to option.name] = option }
+        }
+
+        // SKU 재계산: 유지 조합 재사용, 보관됐던 조합 복원, 새 조합 생성
+        val skuByLabel = allSkus.associateBy { it.optionLabel }
+        val now = OffsetDateTime.now()
+        val skuOptions = mutableListOf<SkuOption>()
+        newCombos.forEach { combo ->
+            val label = labelOf(combo)
+            val sku = skuByLabel[label]?.also { existing ->
+                if (existing.archivedAt != null) {
+                    existing.archivedAt = null
+                    existing.updatedAt = now
+                }
+            } ?: skuRepository.save(Sku(productId = productId, optionLabel = label))
+            combo.forEachIndexed { gi, optionName ->
+                skuOptions += SkuOption(skuId = sku.id!!, optionId = optionByGroupAndName.getValue(gi to optionName).id!!)
+            }
+        }
+        skuOptionRepository.saveAll(skuOptions)
+
+        // 사라지는 활성 조합 보관 (판매 이력 유지)
+        activeSkus.filter { it.optionLabel !in newLabels }.forEach {
+            it.archivedAt = now
+            it.updatedAt = now
+        }
+        product.updatedAt = now
+        return product
+    }
+
+    private fun labelOf(combo: List<String>): String =
+        if (combo.isEmpty()) "기본" else combo.joinToString(" / ")
+
+    /** 현재 Option 구조 (화면의 구조 변경 폼 prefill용). */
+    @Transactional(readOnly = true)
+    fun listOptionStructure(productId: Long): List<NewOptionGroup> {
+        val groups = optionGroupRepository.findAllByProductIdOrderByPosition(productId)
+        if (groups.isEmpty()) return emptyList()
+        val optionsByGroup = optionRepository
+            .findAllByOptionGroupIdInOrderByPosition(groups.mapNotNull { it.id })
+            .groupBy { it.optionGroupId }
+        return groups.map { group ->
+            NewOptionGroup(name = group.name, options = optionsByGroup[group.id].orEmpty().map { it.name })
+        }
+    }
 
     /** 상품명·가격·설명만 수정한다. Option 구조 변경은 이 Slice 범위 밖이다. */
     @Transactional
@@ -169,6 +284,9 @@ class ProductService(
         getProduct(userId, productId) // Tenant 소유 검증
         val sku = skuRepository.findByIdAndProductId(skuId, productId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "SKU를 찾을 수 없습니다.")
+        if (sku.archivedAt != null) {
+            throw ResponseStatusException(HttpStatus.NOT_FOUND, "보관된 SKU는 재고를 수정할 수 없습니다.")
+        }
         if (onHand < sku.reserved + sku.sold) {
             throw ResponseStatusException(
                 HttpStatus.BAD_REQUEST,

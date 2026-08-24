@@ -32,6 +32,10 @@ class Product(
     @Column
     var description: String? = null,
 
+    /** soft delete 시각. 삭제된 상품은 목록·판매 화면에서 숨기고 데이터는 보존한다. */
+    @Column(name = "deleted_at")
+    var deletedAt: OffsetDateTime? = null,
+
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     val createdAt: OffsetDateTime? = null,
 
@@ -98,6 +102,10 @@ class Sku(
     @Column(nullable = false)
     var sold: Int = 0,
 
+    /** Option 구조 변경으로 사라진 조합의 보관 시각. 판매 이력(Sold)은 그대로 유지된다. */
+    @Column(name = "archived_at")
+    var archivedAt: OffsetDateTime? = null,
+
     @Column(name = "updated_at", nullable = false)
     var updatedAt: OffsetDateTime = OffsetDateTime.now(),
 ) {
@@ -125,22 +133,39 @@ data class SkuOptionId(
 ) : java.io.Serializable
 
 interface ProductRepository : JpaRepository<Product, Long> {
-    fun findAllByShopIdOrderByIdDesc(shopId: Long): List<Product>
-    fun findByIdAndShopId(id: Long, shopId: Long): Product?
+    fun findAllByShopIdAndDeletedAtIsNullOrderByIdDesc(shopId: Long): List<Product>
+    fun findByIdAndShopIdAndDeletedAtIsNull(id: Long, shopId: Long): Product?
 }
 
 interface ProductOptionGroupRepository : JpaRepository<ProductOptionGroup, Long> {
     fun findAllByProductIdOrderByPosition(productId: Long): List<ProductOptionGroup>
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query("delete from ProductOptionGroup g where g.productId = :productId")
+    fun deleteAllByProductId(productId: Long)
 }
 
 interface ProductOptionRepository : JpaRepository<ProductOption, Long> {
     fun findAllByOptionGroupIdInOrderByPosition(optionGroupIds: List<Long>): List<ProductOption>
+
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query(
+        "delete from ProductOption o where o.optionGroupId in (select g.id from ProductOptionGroup g where g.productId = :productId)",
+    )
+    fun deleteAllByProductId(productId: Long)
 }
 
 interface SkuRepository : JpaRepository<Sku, Long> {
     fun findAllByProductIdOrderById(productId: Long): List<Sku>
-    fun findAllByProductIdInOrderById(productIds: List<Long>): List<Sku>
+    fun findAllByProductIdAndArchivedAtIsNullOrderById(productId: Long): List<Sku>
+    fun findAllByProductIdInAndArchivedAtIsNullOrderById(productIds: List<Long>): List<Sku>
     fun findByIdAndProductId(id: Long, productId: Long): Sku?
 }
 
-interface SkuOptionRepository : JpaRepository<SkuOption, SkuOptionId>
+interface SkuOptionRepository : JpaRepository<SkuOption, SkuOptionId> {
+    @org.springframework.data.jpa.repository.Modifying
+    @org.springframework.data.jpa.repository.Query(
+        "delete from SkuOption so where so.skuId in (select s.id from Sku s where s.productId = :productId)",
+    )
+    fun deleteAllByProductId(productId: Long)
+}
