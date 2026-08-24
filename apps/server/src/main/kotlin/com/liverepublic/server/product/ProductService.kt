@@ -291,10 +291,14 @@ class ProductService(
         }
     }
 
-    /** 상품명·가격·설명만 수정한다. Option 구조 변경은 이 Slice 범위 밖이다. */
+    /**
+     * 상품명·가격·설명만 수정한다. Option 구조 변경은 replaceOptionStructure가 담당한다.
+     * 쓰기 잠금으로 읽어 동시 삭제 커밋을 스냅샷 flush가 되돌리는 것을 막는다
+     * (잠금 조회의 deleted_at 조건이 재평가되어 삭제 후에는 404가 된다).
+     */
     @Transactional
     fun updateProduct(userId: Long, productId: Long, name: String, price: Int, description: String?): Product {
-        val product = getProduct(userId, productId)
+        val product = getProductForUpdate(userId, productId)
         product.name = name
         product.price = price
         product.description = description
@@ -309,7 +313,8 @@ class ProductService(
      */
     @Transactional
     fun updateOnHand(userId: Long, productId: Long, skuId: Long, onHand: Int): Sku {
-        getProduct(userId, productId) // Tenant 소유 검증
+        // 쓰기 잠금: 동시 삭제·구조 변경(보관)과 직렬화해 보관된 SKU에 재고를 쓰는 경합을 막는다.
+        getProductForUpdate(userId, productId)
         val sku = skuRepository.findByIdAndProductId(skuId, productId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "SKU를 찾을 수 없습니다.")
         if (sku.archivedAt != null) {

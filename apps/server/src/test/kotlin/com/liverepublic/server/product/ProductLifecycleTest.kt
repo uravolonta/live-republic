@@ -302,6 +302,43 @@ class ProductLifecycleTest {
     }
 
     @Test
+    fun `동시 수정이 삭제를 되돌리지 못한다`() {
+        val session = ownerSession("update-delete-race@test.local")
+        val userId = mapper.readTree(
+            mockMvc.perform(get("/api/auth/me").cookie(session)).andReturn().response.contentAsString,
+        ).get("id").asLong()
+
+        // 경합은 비결정적이므로 여러 번 반복해 최종 상태 불변식을 확인한다.
+        repeat(3) { i ->
+            val productId = createProduct(
+                session,
+                """{"name":"경합 상품 $i","price":1000,"optionGroups":[]}""",
+            )
+            val start = java.util.concurrent.CountDownLatch(1)
+            val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+            executor.submit {
+                start.await()
+                try {
+                    productService.deleteProduct(userId, productId)
+                } catch (e: Exception) { /* 404 등 허용 */ }
+            }
+            executor.submit {
+                start.await()
+                try {
+                    productService.updateProduct(userId, productId, "수정 $i", 2000, null)
+                } catch (e: Exception) { /* 삭제가 먼저면 404 — 허용 */ }
+            }
+            start.countDown()
+            executor.shutdown()
+            check(executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
+
+            // 어떤 순서로 실행되든 삭제는 되돌려지면 안 된다.
+            mockMvc.perform(get("/api/products/$productId").cookie(session))
+                .andExpect(status().isNotFound)
+        }
+    }
+
+    @Test
     fun `다른 Shop의 상품은 삭제·구조 변경할 수 없다`() {
         val sessionA = ownerSession("lc-a@test.local")
         val productId = createProduct(sessionA, """{"name":"A의 상품","price":1000,"optionGroups":[]}""")
