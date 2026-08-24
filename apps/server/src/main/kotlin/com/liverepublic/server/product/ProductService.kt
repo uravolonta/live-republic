@@ -117,8 +117,13 @@ class ProductService(
         }
         val savedSkus = skuRepository.saveAll(
             skus.map { spec ->
-                val label = if (spec.optionNames.isEmpty()) "기본" else spec.optionNames.joinToString(" / ")
-                Sku(productId = productId, optionLabel = label, onHand = spec.onHand)
+                val label = labelOf(spec.optionNames)
+                Sku(
+                    productId = productId,
+                    optionLabel = label,
+                    optionKey = keyOf(optionGroups, spec.optionNames),
+                    onHand = spec.onHand,
+                )
             },
         )
         skuOptionRepository.saveAll(
@@ -190,13 +195,15 @@ class ProductService(
                 "Option 조합(SKU)은 상품당 최대 ${MAX_SKUS_PER_PRODUCT}개까지 가능합니다. (요청: ${newCombos.size}개)",
             )
         }
-        val newLabels = newCombos.map { labelOf(it) }
+        // 동일성 판단은 표시 이름이 아니라 그룹명을 포함한 조합 키로 한다.
+        // (색상=빨강 → 소재=빨강처럼 그룹이 바뀌면 다른 조합이다.)
+        val newKeys = newCombos.map { keyOf(optionGroups, it) }
 
         val allSkus = skuRepository.findAllByProductIdOrderById(productId)
         val activeSkus = allSkus.filter { it.archivedAt == null }
 
         // 사라지는 조합에 확보 수량이 있으면 미입금 주문이 걸려 있으므로 거절한다.
-        activeSkus.firstOrNull { it.optionLabel !in newLabels && it.reserved > 0 }?.let {
+        activeSkus.firstOrNull { it.optionKey !in newKeys && it.reserved > 0 }?.let {
             throw ResponseStatusException(
                 HttpStatus.CONFLICT,
                 "확보(입금대기) 수량이 남은 SKU(${it.optionLabel})는 구조 변경으로 없앨 수 없습니다.",
@@ -220,18 +227,20 @@ class ProductService(
             ).forEach { option -> optionByGroupAndName[gi to option.name] = option }
         }
 
-        // SKU 재계산: 유지 조합 재사용, 보관됐던 조합 복원, 새 조합 생성
-        val skuByLabel = allSkus.associateBy { it.optionLabel }
+        // SKU 재계산: 유지 조합 재사용, 보관됐던 같은 조합 복원, 새 조합 생성 — 모두 조합 키 기준
+        val skuByKey = allSkus.associateBy { it.optionKey }
         val now = OffsetDateTime.now()
         val skuOptions = mutableListOf<SkuOption>()
         newCombos.forEach { combo ->
-            val label = labelOf(combo)
-            val sku = skuByLabel[label]?.also { existing ->
+            val key = keyOf(optionGroups, combo)
+            val sku = skuByKey[key]?.also { existing ->
                 if (existing.archivedAt != null) {
                     existing.archivedAt = null
                     existing.updatedAt = now
                 }
-            } ?: skuRepository.save(Sku(productId = productId, optionLabel = label))
+            } ?: skuRepository.save(
+                Sku(productId = productId, optionLabel = labelOf(combo), optionKey = key),
+            )
             combo.forEachIndexed { gi, optionName ->
                 skuOptions += SkuOption(skuId = sku.id!!, optionId = optionByGroupAndName.getValue(gi to optionName).id!!)
             }
@@ -239,7 +248,7 @@ class ProductService(
         skuOptionRepository.saveAll(skuOptions)
 
         // 사라지는 활성 조합 보관 (판매 이력 유지)
-        activeSkus.filter { it.optionLabel !in newLabels }.forEach {
+        activeSkus.filter { it.optionKey !in newKeys }.forEach {
             it.archivedAt = now
             it.updatedAt = now
         }
@@ -249,6 +258,14 @@ class ProductService(
 
     private fun labelOf(combo: List<String>): String =
         if (combo.isEmpty()) "기본" else combo.joinToString(" / ")
+
+    /**
+     * 그룹명을 포함한 안정적 조합 키. 이름에 '/'와 '='를 금지하므로 키는 단사(injective)다.
+     * combo는 optionGroups와 같은 순서의 옵션 값 목록이다.
+     */
+    private fun keyOf(optionGroups: List<NewOptionGroup>, combo: List<String>): String =
+        if (combo.isEmpty()) "기본"
+        else combo.mapIndexed { gi, optionName -> "${optionGroups[gi].name}=$optionName" }.joinToString(" / ")
 
     /** 현재 Option 구조 (화면의 구조 변경 폼 prefill용). */
     @Transactional(readOnly = true)
@@ -310,16 +327,19 @@ class ProductService(
             if (group.name.isBlank() || group.name.length > 50) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름은 1자 이상 50자 이하여야 합니다.")
             }
+            // '/'와 '='는 조합 키("그룹=옵션 / …")의 구조 문자라 이름에 쓰면 서로 다른
+            // 조합이 같은 키를 가질 수 있다. 쉼표는 Excel/화면 입력 구분자다.
+            if (group.name.contains('/') || group.name.contains('=')) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름에는 '/'와 '='를 사용할 수 없습니다.")
+            }
             if (group.options.isEmpty() || group.options.size > 20) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option은 그룹당 1개 이상 20개 이하여야 합니다.")
             }
             if (group.options.any { it.isBlank() || it.length > 50 }) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름은 1자 이상 50자 이하여야 합니다.")
             }
-            // 조합 표시 이름을 " / "로 만들기 때문에 이름에 구분자가 들어가면
-            // 서로 다른 조합이 같은 표시 이름을 가질 수 있다. 쉼표는 Excel/화면 입력 구분자다.
-            if (group.options.any { it.contains('/') || it.contains(',') }) {
-                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름에는 '/'와 ','를 사용할 수 없습니다.")
+            if (group.options.any { it.contains('/') || it.contains(',') || it.contains('=') }) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름에는 '/', ',', '='를 사용할 수 없습니다.")
             }
             if (group.options.toSet().size != group.options.size) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 그룹에 중복된 Option이 있습니다.")

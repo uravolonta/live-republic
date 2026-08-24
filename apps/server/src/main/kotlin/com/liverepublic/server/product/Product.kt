@@ -93,6 +93,10 @@ class Sku(
     @Column(name = "option_label", nullable = false)
     val optionLabel: String,
 
+    /** 그룹명을 포함한 안정적 조합 식별자 (예: "색상=빨강 / 사이즈=M"). 구조 변경 시 동일성 판단에 사용한다. */
+    @Column(name = "option_key", nullable = false)
+    val optionKey: String,
+
     @Column(name = "on_hand", nullable = false)
     var onHand: Int = 0,
 

@@ -226,9 +226,12 @@ class ProductExcelService(private val productService: ProductService) {
                         continue
                     }
                     if (groupName.length > 50) rowErrors += "옵션그룹${g + 1} 이름은 50자 이하여야 합니다."
+                    if (groupName.contains('/') || groupName.contains('=')) {
+                        rowErrors += "옵션그룹${g + 1} 이름에는 '/'와 '='를 사용할 수 없습니다."
+                    }
                     if (optionName.length > 50) rowErrors += "옵션${g + 1} 이름은 50자 이하여야 합니다."
-                    if (optionName.contains('/') || optionName.contains(',')) {
-                        rowErrors += "옵션${g + 1} 이름에는 '/'와 ','를 사용할 수 없습니다."
+                    if (optionName.contains('/') || optionName.contains(',') || optionName.contains('=')) {
+                        rowErrors += "옵션${g + 1} 이름에는 '/', ',', '='를 사용할 수 없습니다."
                     }
                     options += groupName to optionName
                 }

@@ -189,6 +189,68 @@ class ProductLifecycleTest {
     }
 
     @Test
+    fun `그룹명이 바뀌면 값이 같아도 다른 조합이며 이력이 이전되지 않는다`() {
+        val session = ownerSession("groupkey@test.local")
+        val productId = createProduct(
+            session,
+            """{"name":"키 검증 상품","price":5000,"optionGroups":[{"name":"색상","options":["빨강"]}]}""",
+        )
+        val original = skuRepository.findAllByProductIdOrderById(productId).first()
+        original.onHand = 5
+        original.sold = 2
+        skuRepository.save(original)
+
+        // 색상=빨강 → 소재=빨강: 표시 이름은 같지만("빨강") 다른 조합이다.
+        mockMvc.perform(
+            put("/api/products/$productId/options").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"optionGroups":[{"name":"소재","options":["빨강"]}]}"""),
+        ).andExpect(status().isOk)
+            // 새 조합은 재고 0의 새 SKU여야 한다 — 기존 이력이 이전되면 안 된다.
+            .andExpect(jsonPath("$.skus.length()").value(1))
+            .andExpect(jsonPath("$.skus[0].onHand").value(0))
+            .andExpect(jsonPath("$.skus[0].sold").value(0))
+
+        // 기존 색상=빨강 SKU는 보관되고 이력이 남는다.
+        val skus = skuRepository.findAllByProductIdOrderById(productId)
+        val archived = skus.first { it.id == original.id }
+        assert(archived.archivedAt != null && archived.sold == 2 && archived.onHand == 5)
+    }
+
+    @Test
+    fun `그룹명 변경으로도 확보 수량 보호를 우회할 수 없다`() {
+        val session = ownerSession("groupkey-reserved@test.local")
+        val productId = createProduct(
+            session,
+            """{"name":"확보 키 상품","price":5000,"optionGroups":[{"name":"색상","options":["빨강"]}]}""",
+        )
+        val sku = skuRepository.findAllByProductIdOrderById(productId).first()
+        sku.onHand = 3
+        sku.reserved = 1
+        skuRepository.save(sku)
+
+        // 색상=빨강(reserved 있음)이 사라지는 변경이므로 라벨이 같아도 거절돼야 한다.
+        mockMvc.perform(
+            put("/api/products/$productId/options").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"optionGroups":[{"name":"소재","options":["빨강"]}]}"""),
+        ).andExpect(status().isConflict)
+    }
+
+    @Test
+    fun `이름에 구조 문자가 들어가면 거절된다`() {
+        val session = ownerSession("structchar@test.local")
+        // 그룹명 '='
+        mockMvc.perform(
+            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상=코드","options":["빨강"]}]}"""),
+        ).andExpect(status().isBadRequest)
+        // 옵션명 '='
+        mockMvc.perform(
+            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상","options":["빨강=1"]}]}"""),
+        ).andExpect(status().isBadRequest)
+    }
+
+    @Test
     fun `다른 Shop의 상품은 삭제·구조 변경할 수 없다`() {
         val sessionA = ownerSession("lc-a@test.local")
         val productId = createProduct(sessionA, """{"name":"A의 상품","price":1000,"optionGroups":[]}""")
