@@ -161,7 +161,7 @@ class ProductService(
      */
     @Transactional
     fun deleteProduct(userId: Long, productId: Long) {
-        val product = getProduct(userId, productId)
+        val product = getProductForUpdate(userId, productId)
         val reservedSku = skuRepository.findAllByProductIdOrderById(productId).firstOrNull { it.reserved > 0 }
         if (reservedSku != null) {
             throw ResponseStatusException(
@@ -182,7 +182,8 @@ class ProductService(
      */
     @Transactional
     fun replaceOptionStructure(userId: Long, productId: Long, optionGroups: List<NewOptionGroup>): Product {
-        val product = getProduct(userId, productId)
+        // 쓰기 잠금으로 동시 구조 변경을 직렬화한다. (product_id, option_key) UNIQUE가 최종 방어선이다.
+        val product = getProductForUpdate(userId, productId)
         validateOptionGroups(optionGroups)
 
         val newCombos: List<List<String>> =
@@ -259,13 +260,23 @@ class ProductService(
     private fun labelOf(combo: List<String>): String =
         if (combo.isEmpty()) "기본" else combo.joinToString(" / ")
 
+    private fun getProductForUpdate(userId: Long, productId: Long): Product =
+        productRepository.findByIdAndShopIdForUpdate(productId, ownerShopId(userId))
+            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "상품을 찾을 수 없습니다.")
+
     /**
-     * 그룹명을 포함한 안정적 조합 키. 이름에 '/'와 '='를 금지하므로 키는 단사(injective)다.
+     * 그룹명을 포함한 안정적 조합 키. 이름에 어떤 문자가 오더라도 이스케이프
+     * ('\'→'\\', '='→'\=', '/'→'\/')로 키가 단사(injective)임을 보장한다.
      * combo는 optionGroups와 같은 순서의 옵션 값 목록이다.
      */
     private fun keyOf(optionGroups: List<NewOptionGroup>, combo: List<String>): String =
         if (combo.isEmpty()) "기본"
-        else combo.mapIndexed { gi, optionName -> "${optionGroups[gi].name}=$optionName" }.joinToString(" / ")
+        else combo.mapIndexed { gi, optionName ->
+            "${escapeKeyPart(optionGroups[gi].name)}=${escapeKeyPart(optionName)}"
+        }.joinToString(" / ")
+
+    private fun escapeKeyPart(name: String): String =
+        name.replace("\\", "\\\\").replace("=", "\\=").replace("/", "\\/")
 
     /** 현재 Option 구조 (화면의 구조 변경 폼 prefill용). */
     @Transactional(readOnly = true)
@@ -327,19 +338,17 @@ class ProductService(
             if (group.name.isBlank() || group.name.length > 50) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름은 1자 이상 50자 이하여야 합니다.")
             }
-            // '/'와 '='는 조합 키("그룹=옵션 / …")의 구조 문자라 이름에 쓰면 서로 다른
-            // 조합이 같은 키를 가질 수 있다. 쉼표는 Excel/화면 입력 구분자다.
-            if (group.name.contains('/') || group.name.contains('=')) {
-                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option Group 이름에는 '/'와 '='를 사용할 수 없습니다.")
-            }
             if (group.options.isEmpty() || group.options.size > 20) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option은 그룹당 1개 이상 20개 이하여야 합니다.")
             }
             if (group.options.any { it.isBlank() || it.length > 50 }) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름은 1자 이상 50자 이하여야 합니다.")
             }
-            if (group.options.any { it.contains('/') || it.contains(',') || it.contains('=') }) {
-                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름에는 '/', ',', '='를 사용할 수 없습니다.")
+            // 조합 표시 이름을 " / "로 만들기 때문에 이름에 구분자가 들어가면
+            // 서로 다른 조합이 같은 표시 이름을 가질 수 있다. 쉼표는 Excel/화면 입력 구분자다.
+            // (조합 키는 이스케이프 인코딩이라 이름 제한이 필요 없다.)
+            if (group.options.any { it.contains('/') || it.contains(',') }) {
+                throw ResponseStatusException(HttpStatus.BAD_REQUEST, "Option 이름에는 '/'와 ','를 사용할 수 없습니다.")
             }
             if (group.options.toSet().size != group.options.size) {
                 throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 그룹에 중복된 Option이 있습니다.")

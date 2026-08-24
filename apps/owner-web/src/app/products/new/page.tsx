@@ -145,8 +145,7 @@ export default function NewProductPage() {
           )}
           <p className="text-xs text-gray-500">
             Option 조합마다 SKU가 만들어지고 SKU별로 재고를 관리합니다 (상품당 최대 100개
-            조합). 그룹·옵션 이름에는 &apos;/&apos;, &apos;,&apos;, &apos;=&apos;를 쓸 수
-            없습니다.
+            조합). Option 이름에는 &apos;/&apos;와 &apos;,&apos;를 쓸 수 없습니다.
           </p>
         </fieldset>
 

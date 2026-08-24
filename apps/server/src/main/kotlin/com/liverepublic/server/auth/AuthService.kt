@@ -12,13 +12,21 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import org.springframework.web.server.ResponseStatusException
 
-/** 인증된 사용자를 나타내는 Session Principal. */
+/**
+ * 인증된 사용자를 나타내는 Session Principal.
+ * java.security.Principal을 구현해 spring-session의 PRINCIPAL_NAME(varchar 100)에
+ * toString() 전체가 아닌 name(최대 100자)만 저장되게 한다 — 긴 이메일로 로그인이
+ * 실패하는 문제를 막는다.
+ */
 data class AuthUser(
     val id: Long,
     val email: String,
-    val name: String,
+    // Principal.getName()과의 JVM 시그니처 충돌을 피하기 위해 getter 이름만 바꾼다.
+    @get:JvmName("getDisplayName") val name: String,
     val mustChangePassword: Boolean = false,
-) : java.io.Serializable {
+) : java.io.Serializable, java.security.Principal {
+    override fun getName(): String = name
+
     companion object {
         // 필드가 추가되어도 기존 세션을 읽을 수 있도록 고정한다.
         private const val serialVersionUID = 1L

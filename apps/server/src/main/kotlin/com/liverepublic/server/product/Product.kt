@@ -139,6 +139,13 @@ data class SkuOptionId(
 interface ProductRepository : JpaRepository<Product, Long> {
     fun findAllByShopIdAndDeletedAtIsNullOrderByIdDesc(shopId: Long): List<Product>
     fun findByIdAndShopIdAndDeletedAtIsNull(id: Long, shopId: Long): Product?
+
+    /** 구조 변경·삭제의 동시 실행을 직렬화하기 위한 쓰기 잠금 조회. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query(
+        "select p from Product p where p.id = :id and p.shopId = :shopId and p.deletedAt is null",
+    )
+    fun findByIdAndShopIdForUpdate(id: Long, shopId: Long): Product?
 }
 
 interface ProductOptionGroupRepository : JpaRepository<ProductOptionGroup, Long> {

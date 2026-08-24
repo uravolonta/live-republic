@@ -236,18 +236,69 @@ class ProductLifecycleTest {
     }
 
     @Test
-    fun `이름에 구조 문자가 들어가면 거절된다`() {
+    fun `'='가 포함된 이름도 허용되며 키 충돌 없이 구분된다`() {
         val session = ownerSession("structchar@test.local")
-        // 그룹명 '='
+        // 기존에 허용되던 '=' 포함 그룹명은 계속 쓸 수 있다 (키는 이스케이프 인코딩).
+        val productId = createProduct(
+            session,
+            """{"name":"이스케이프 상품","price":1000,"optionGroups":[{"name":"색상=코드","options":["빨강"]}]}""",
+        )
+        val sku = skuRepository.findAllByProductIdOrderById(productId).first()
+        sku.onHand = 4
+        skuRepository.save(sku)
+
+        // 그룹명만 "색상"으로 바꾸면 라벨("빨강")이 같아도 다른 조합 — 이력이 이전되지 않는다.
         mockMvc.perform(
-            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상=코드","options":["빨강"]}]}"""),
-        ).andExpect(status().isBadRequest)
-        // 옵션명 '='
-        mockMvc.perform(
-            post("/api/products").cookie(session).contentType(MediaType.APPLICATION_JSON)
-                .content("""{"name":"불량","price":1000,"optionGroups":[{"name":"색상","options":["빨강=1"]}]}"""),
-        ).andExpect(status().isBadRequest)
+            put("/api/products/$productId/options").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"optionGroups":[{"name":"색상","options":["빨강"]}]}"""),
+        ).andExpect(status().isOk)
+            .andExpect(jsonPath("$.skus.length()").value(1))
+            .andExpect(jsonPath("$.skus[0].onHand").value(0))
+    }
+
+    @Autowired
+    lateinit var productService: ProductService
+
+    @Test
+    fun `동시 구조 변경에도 같은 조합의 SKU가 중복 생성되지 않는다`() {
+        val session = ownerSession("concurrent-structure@test.local")
+        val productId = createProduct(
+            session,
+            """{"name":"동시 변경 상품","price":1000,"optionGroups":[{"name":"색상","options":["검정"]}]}""",
+        )
+        val userId = mapper.readTree(
+            mockMvc.perform(get("/api/auth/me").cookie(session)).andReturn().response.contentAsString,
+        ).get("id").asLong()
+
+        val threads = 4
+        val ready = java.util.concurrent.CountDownLatch(threads)
+        val start = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(threads)
+        val failures = java.util.concurrent.atomic.AtomicInteger()
+        repeat(threads) {
+            executor.submit {
+                ready.countDown()
+                start.await()
+                try {
+                    productService.replaceOptionStructure(
+                        userId, productId,
+                        listOf(NewOptionGroup(name = "색상", options = listOf("검정", "흰색"))),
+                    )
+                } catch (e: Exception) {
+                    failures.incrementAndGet()
+                }
+            }
+        }
+        ready.await()
+        start.countDown()
+        executor.shutdown()
+        check(executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        // 잠금으로 직렬화되므로 활성 SKU의 조합 키는 유일해야 한다.
+        val active = skuRepository.findAllByProductIdOrderById(productId).filter { it.archivedAt == null }
+        val keys = active.map { it.optionKey }
+        assert(keys.toSet().size == keys.size) { "중복 조합 키: $keys (실패 스레드 ${failures.get()})" }
+        assert(keys.size == 2) { "활성 SKU는 2개여야 한다: $keys" }
     }
 
     @Test
