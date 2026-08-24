@@ -104,7 +104,7 @@ class LiveService(
     private fun getMutableLive(userId: Long, liveId: Long): Live {
         val live = getLive(userId, liveId)
         if (live.status != LiveStatus.SCHEDULED) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "취소된 Live는 수정할 수 없습니다.")
+            throw ResponseStatusException(HttpStatus.CONFLICT, "예정 상태의 Live만 수정할 수 있습니다. (현재: ${live.status})")
         }
         return live
     }

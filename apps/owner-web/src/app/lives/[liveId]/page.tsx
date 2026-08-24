@@ -142,7 +142,7 @@ export default function LiveDetailPage() {
     return <main className="p-8 text-sm text-gray-500">불러오는 중…</main>;
   }
 
-  const cancelled = live.status === "CANCELLED";
+  const cancelled = live.status !== "SCHEDULED"; // 예정 상태에서만 수정 가능 (방송중·종료·취소는 읽기 전용)
   const productById = new Map(allProducts.map((p) => [p.id, p]));
   const unselectedProducts = allProducts.filter((p) => !selectedProductIds.includes(p.id));
 
@@ -151,7 +151,9 @@ export default function LiveDetailPage() {
       <header className="flex items-center justify-between">
         <h1 className="text-xl font-bold">
           {live.title}
-          {cancelled && <span className="ml-2 text-sm text-red-600">취소됨</span>}
+          {live.status === "LIVE" && <span className="ml-2 text-sm text-red-500">● 방송중</span>}
+          {live.status === "ENDED" && <span className="ml-2 text-sm text-gray-500">종료됨</span>}
+          {live.status === "CANCELLED" && <span className="ml-2 text-sm text-red-600">취소됨</span>}
         </h1>
         <Link href="/lives" className="text-sm text-gray-500 underline">
           Live 목록으로

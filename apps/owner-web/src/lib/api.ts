@@ -52,10 +52,12 @@ export type Streamer = {
   mustChangePassword: boolean;
 };
 
+export type LiveStatus = "SCHEDULED" | "LIVE" | "ENDED" | "CANCELLED";
+
 export type LiveSummary = {
   id: number;
   title: string;
-  status: "SCHEDULED" | "CANCELLED";
+  status: LiveStatus;
   scheduledStartAt: string;
   thumbnailUrl: string | null;
   productCount: number;
@@ -65,7 +67,7 @@ export type LiveSummary = {
 export type LiveDetail = {
   id: number;
   title: string;
-  status: "SCHEDULED" | "CANCELLED";
+  status: LiveStatus;
   scheduledStartAt: string;
   thumbnailUrl: string | null;
   products: { productId: number; name: string; price: number; position: number }[];
