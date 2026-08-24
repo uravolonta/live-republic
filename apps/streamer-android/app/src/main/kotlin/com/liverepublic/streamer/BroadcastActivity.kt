@@ -32,6 +32,8 @@ class BroadcastActivity : AppCompatActivity() {
     private var session: BroadcastSession? = null
     private var detail: JSONObject? = null
     private var streaming = false
+    private var connectionState: String? = null
+    private var confirmJob: kotlinx.coroutines.Job? = null
 
     private lateinit var previewContainer: FrameLayout
     private lateinit var statusText: TextView
@@ -42,17 +44,18 @@ class BroadcastActivity : AppCompatActivity() {
     private val sessionListener = object : BroadcastSession.Listener() {
         override fun onStateChanged(state: BroadcastSession.State) {
             runOnUiThread {
+                connectionState = state.name
                 when (state) {
-                    BroadcastSession.State.CONNECTED -> {
-                        statusText.text = "● 방송중 (송출 연결됨)"
-                        // 실제 연결이 확인된 뒤에만 서버가 방송 중(LIVE)으로 확정한다.
+                    BroadcastSession.State.CONNECTED ->
+                        // 실제 연결이 확인된 뒤에만 서버가 방송 중으로 확정한다.
+                        // (재연결 시에도 호출되어 새 Stream Session이 이력에 기록된다.)
                         confirmLive()
-                    }
                     BroadcastSession.State.DISCONNECTED,
                     BroadcastSession.State.ERROR,
                     -> streaming = false // 실제 연결 해제 후에만 재시작을 허용한다.
                     else -> Unit
                 }
+                updateStatusText()
             }
         }
 
@@ -61,6 +64,11 @@ class BroadcastActivity : AppCompatActivity() {
                 Toast.makeText(this@BroadcastActivity, "송출 오류: ${exception.detail}", Toast.LENGTH_LONG).show()
             }
         }
+    }
+
+    private fun updateStatusText() {
+        val live = detail ?: return
+        statusText.text = BroadcastUi.statusLabel(live.getString("status"), live.getString("title"), connectionState)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -127,10 +135,12 @@ class BroadcastActivity : AppCompatActivity() {
 
     /** 카메라 미리보기를 붙이고 Live 상태를 불러온다. */
     private fun setUp() {
-        // 720p/30fps 세로 송출 (2026-08-24 결정: BASIC + 720p)
+        // 720p/30fps 세로 송출 (2026-08-24 결정: BASIC + 720p) + 일시적 네트워크 단절 자동 재연결
+        val config = Presets.Configuration.STANDARD_PORTRAIT
+        config.autoReconnect.setEnabled(true)
         val broadcastSession = BroadcastSession(
             this, sessionListener,
-            Presets.Configuration.STANDARD_PORTRAIT,
+            config,
             Presets.Devices.BACK_CAMERA(this),
         )
         session = broadcastSession
@@ -168,12 +178,7 @@ class BroadcastActivity : AppCompatActivity() {
     private fun render() {
         val live = detail ?: return
         val status = live.getString("status")
-        statusText.text = when (status) {
-            "LIVE" -> "● 방송중 — ${live.getString("title")}"
-            "STARTING" -> "송출 연결 중… — ${live.getString("title")}"
-            "SCHEDULED" -> "방송 준비 — ${live.getString("title")}"
-            else -> "${live.getString("title")} ($status)"
-        }
+        updateStatusText()
 
         // 상품 전환 Layer
         productBar.removeAllViews()
@@ -204,28 +209,16 @@ class BroadcastActivity : AppCompatActivity() {
         skuText.text = currentSkuSummary
 
         // 시작/종료 버튼
+        val (label, enabled) = BroadcastUi.action(status)
+        actionButton.text = label
+        actionButton.isEnabled = enabled
         when (status) {
-            "SCHEDULED" -> {
-                actionButton.text = "방송 시작"
-                actionButton.setOnClickListener { start() }
-                actionButton.isEnabled = true
-            }
-            "STARTING" -> {
-                actionButton.text = "시작 취소"
+            "SCHEDULED" -> actionButton.setOnClickListener { start() }
+            "STARTING", "LIVE" -> {
                 actionButton.setOnClickListener { end() }
-                actionButton.isEnabled = true
+                // 앱 재실행·목록 재진입 시 송출을 재개하고, 연결돼 있으면 확정을 재시도한다.
                 startStreamingIfNeeded(live)
-            }
-            "LIVE" -> {
-                actionButton.text = "방송 종료"
-                actionButton.setOnClickListener { end() }
-                actionButton.isEnabled = true
-                // 앱 재시작 등으로 송출이 끊겼다면 재개한다.
-                startStreamingIfNeeded(live)
-            }
-            else -> {
-                actionButton.text = "종료된 방송입니다"
-                actionButton.isEnabled = false
+                if (connectionState == "CONNECTED") confirmLive()
             }
         }
     }
@@ -249,11 +242,12 @@ class BroadcastActivity : AppCompatActivity() {
     }
 
     private fun startStreamingIfNeeded(live: JSONObject) {
-        // 상품 전환 등 화면 갱신 때마다 불리므로, 이미 송출 중이면 다시 시작하지 않는다.
-        if (streaming) return
         val ingest = live.optString("ingestEndpoint", "")
         val streamKey = live.optString("streamKey", "")
-        if (ingest.isEmpty() || streamKey.isEmpty()) return
+        // 화면 갱신 때마다 불리므로 매퍼 규칙으로 재시작 여부를 판단한다 (중복 start 방지).
+        if (!BroadcastUi.shouldStartStreaming(live.getString("status"), ingest.isNotEmpty() && streamKey.isNotEmpty(), streaming)) {
+            return
+        }
         try {
             session?.start(ingest, streamKey)
             streaming = true
@@ -262,29 +256,44 @@ class BroadcastActivity : AppCompatActivity() {
         }
     }
 
-    /** SDK CONNECTED 이후 서버에 방송 중 확정을 요청한다. */
+    /**
+     * SDK CONNECTED 이후 서버에 방송 중 확정을 요청한다.
+     * IVS 감지 지연·통신 오류에 대비해 제한된 백오프로 재시도하며,
+     * 연결 해제·종료·성공·시간 초과 시 중단한다. 최종 실패 시 사용자에게 안내한다.
+     */
     private fun confirmLive() {
-        val status = detail?.optString("status")
-        if (status != "STARTING") return
-        lifecycleScope.launch {
-            val result = ApiClient.post("/api/broadcast/lives/$liveId/confirm")
-            if (result.status == 200) {
-                detail = ApiClient.json(result)
-                render()
-            } else if (result.status == 409) {
-                // IVS가 아직 송출을 감지하지 못한 경우 — 잠시 후 한 번 더 시도한다.
-                kotlinx.coroutines.delay(3000)
-                val retry = ApiClient.post("/api/broadcast/lives/$liveId/confirm")
-                if (retry.status == 200) {
-                    detail = ApiClient.json(retry)
+        val status = detail?.optString("status") ?: return
+        if (!BroadcastUi.shouldConfirm(status, connected = true)) return
+        if (confirmJob?.isActive == true) return
+        confirmJob = lifecycleScope.launch {
+            val deadline = System.currentTimeMillis() + CONFIRM_TIMEOUT_MS
+            var delayMs = 2000L
+            while (System.currentTimeMillis() < deadline) {
+                val result = ApiClient.post("/api/broadcast/lives/$liveId/confirm")
+                if (result.status == 200) {
+                    detail = ApiClient.json(result)
                     render()
+                    return@launch
                 }
+                // SDK 연결이 끊겼거나 화면 상태가 바뀌면 중단한다.
+                if (connectionState != "CONNECTED") return@launch
+                if (result.status != 409 && result.status != 0 && result.status < 500) return@launch
+                kotlinx.coroutines.delay(delayMs)
+                delayMs = (delayMs * 2).coerceAtMost(10_000L)
+            }
+            if (detail?.optString("status") == "STARTING") {
+                Toast.makeText(
+                    this@BroadcastActivity,
+                    "방송 확정에 실패했습니다. 화면을 다시 열어 재시도하거나 '시작 취소' 후 다시 시작하세요.",
+                    Toast.LENGTH_LONG,
+                ).show()
             }
         }
     }
 
     private fun end() {
         actionButton.isEnabled = false
+        confirmJob?.cancel()
         session?.stop()
         streaming = false
         lifecycleScope.launch {
@@ -324,11 +333,13 @@ class BroadcastActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        confirmJob?.cancel()
         session?.release()
         session = null
     }
 
     companion object {
         private val PERMISSIONS = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+        private const val CONFIRM_TIMEOUT_MS = 60_000L
     }
 }

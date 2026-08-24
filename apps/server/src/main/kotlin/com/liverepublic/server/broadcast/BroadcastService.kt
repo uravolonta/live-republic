@@ -26,6 +26,7 @@ class BroadcastService(
     private val shopRepository: ShopRepository,
     private val liveRepository: LiveRepository,
     private val liveProductRepository: LiveProductRepository,
+    private val streamSessionRepository: com.liverepublic.server.live.LiveStreamSessionRepository,
     private val productRepository: ProductRepository,
     private val ivsService: IvsService,
 ) {
@@ -39,11 +40,16 @@ class BroadcastService(
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
     }
 
-    /** 방송 화면에서 다루는 Live: 방송 중인 것 먼저, 그다음 예정. */
+    /**
+     * 방송 화면에서 다루는 Live: 방송 중 → 시작 중 → 예정 순.
+     * STARTING은 Shop의 방송 슬롯을 점유하므로 반드시 목록에 보여 재진입(송출 재개)
+     * 또는 시작 취소가 가능해야 한다.
+     */
     @Transactional(readOnly = true)
     fun listBroadcastableLives(userId: Long): List<Live> {
         val shopId = broadcasterShopId(userId)
         return liveRepository.findAllByShopIdAndStatusOrderByScheduledStartAtDesc(shopId, LiveStatus.LIVE) +
+            liveRepository.findAllByShopIdAndStatusOrderByScheduledStartAtDesc(shopId, LiveStatus.STARTING) +
             liveRepository.findAllByShopIdAndStatusOrderByScheduledStartAtDesc(shopId, LiveStatus.SCHEDULED)
     }
 
@@ -124,67 +130,92 @@ class BroadcastService(
     }
 
     /**
-     * 방송 중 확정: 앱이 SDK 연결(CONNECTED)을 확인한 뒤 호출한다.
-     * IVS에서 실제 Stream Session을 조회해 식별자와 실제 시작 시각을 기록한다.
+     * 방송 중 확정: 앱이 SDK 연결(CONNECTED)을 확인할 때마다 호출한다.
+     * IVS에서 실제 Stream Session을 조회해 이력(live_stream_session)에 기록한다 —
+     * 재연결로 새 Session이 생기면 이전 이력을 닫고 새 행을 추가한다.
      */
     @Transactional
     fun confirm(userId: Long, liveId: Long): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
-        if (live.status == LiveStatus.LIVE) return live // 중복 확인 허용
-        if (live.status != LiveStatus.STARTING) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "시작 중인 Live만 방송 중으로 확정할 수 있습니다. (현재: ${live.status})")
+        if (live.status != LiveStatus.STARTING && live.status != LiveStatus.LIVE) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, "시작 중이거나 방송 중인 Live만 확정할 수 있습니다. (현재: ${live.status})")
         }
-        val streamSessionId = live.ivsChannelArn?.let { ivsService.currentStreamSessionId(it) }
+        val channelArn = live.ivsChannelArn
+            ?: throw ResponseStatusException(HttpStatus.CONFLICT, "IVS Channel이 없습니다. 방송을 다시 시작하세요.")
+        val streamSessionId = ivsService.currentStreamSessionId(channelArn)
             ?: throw ResponseStatusException(HttpStatus.CONFLICT, "IVS에서 송출이 아직 감지되지 않았습니다. 잠시 후 다시 시도하세요.")
-        live.status = LiveStatus.LIVE
-        live.startedAt = OffsetDateTime.now()
+
+        val now = OffsetDateTime.now()
+        val openSession = streamSessionRepository.findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId)
+        if (openSession?.ivsStreamId != streamSessionId) {
+            openSession?.endedAt = now
+            streamSessionRepository.save(
+                com.liverepublic.server.live.LiveStreamSession(
+                    liveId = liveId, ivsChannelArn = channelArn,
+                    ivsStreamId = streamSessionId, startedAt = now,
+                ),
+            )
+        }
         live.ivsStreamSessionId = streamSessionId
-        live.updatedAt = OffsetDateTime.now()
+        if (live.status == LiveStatus.STARTING) {
+            live.status = LiveStatus.LIVE
+            live.startedAt = now
+        }
+        live.updatedAt = now
         return live
     }
 
     /**
-     * 방송 종료: LIVE → ENDED. STARTING이면 시작 취소로 보고 SCHEDULED로 되돌린다.
-     * IVS 송출 중단 실패는 기록하고 1회 재시도한다 — 실패해도 DB 종료는 확정한다
-     * (송출 자체는 앱의 session.stop()이 1차로 중단하며, Stream Key는 더 이상 노출되지 않는다).
+     * 방송 종료: LIVE → ENDED, STARTING → SCHEDULED(시작 취소).
+     * 두 경우 모두 서버가 IVS 송출 중단을 시도한다 — STARTING도 SDK가 이미 연결됐을 수 있다.
+     * 중단이 2회 모두 실패하면 종료를 확정하지 않고 502로 실패시켜(운영 경보 로그 포함)
+     * 실제 송출이 계속되는데 시스템만 종료로 표시되는 상태를 막는다. 사용자는 재시도한다.
      */
     @Transactional
     fun end(userId: Long, liveId: Long): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
-        when (live.status) {
-            LiveStatus.STARTING -> {
-                // 연결 실패 등으로 시작을 취소한다. Channel은 재사용을 위해 유지한다.
-                live.status = LiveStatus.SCHEDULED
-                live.startedByUserId = null
-                live.currentLiveProductId = null
-                live.updatedAt = OffsetDateTime.now()
-                return live
-            }
-            LiveStatus.LIVE -> Unit
-            else -> throw ResponseStatusException(
+        if (live.status != LiveStatus.STARTING && live.status != LiveStatus.LIVE) {
+            throw ResponseStatusException(
                 HttpStatus.CONFLICT, "방송 중이거나 시작 중인 Live만 종료할 수 있습니다. (현재: ${live.status})",
             )
         }
-        live.status = LiveStatus.ENDED
-        live.endedAt = OffsetDateTime.now()
-        live.updatedAt = OffsetDateTime.now()
-        live.ivsChannelArn?.let { arn -> stopStreamWithRetry(arn, liveId) }
+        live.ivsChannelArn?.let { arn -> stopStreamOrThrow(arn, liveId) }
+
+        val now = OffsetDateTime.now()
+        streamSessionRepository.findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId)?.let { it.endedAt = now }
+        if (live.status == LiveStatus.STARTING) {
+            // 연결 실패 등으로 시작을 취소한다. Channel은 재사용을 위해 유지한다.
+            live.status = LiveStatus.SCHEDULED
+            live.startedByUserId = null
+            live.currentLiveProductId = null
+        } else {
+            live.status = LiveStatus.ENDED
+            live.endedAt = now
+        }
+        live.updatedAt = now
         return live
     }
 
-    private fun stopStreamWithRetry(channelArn: String, liveId: Long) {
+    private fun stopStreamOrThrow(channelArn: String, liveId: Long) {
+        var lastError: Exception? = null
         repeat(2) { attempt ->
             try {
                 ivsService.stopStream(channelArn)
                 return
             } catch (e: Exception) {
-                log.warn("IVS 송출 중단 실패 (live={}, channel={}, 시도 {}/2): {}", liveId, channelArn, attempt + 1, e.message)
+                lastError = e
+                log.error("IVS 송출 중단 실패 (live={}, channel={}, 시도 {}/2): {}", liveId, channelArn, attempt + 1, e.message)
             }
         }
+        throw ResponseStatusException(
+            HttpStatus.BAD_GATEWAY,
+            "IVS 송출 중단에 실패했습니다. 잠시 후 종료를 다시 시도하세요.",
+            lastError,
+        )
     }
 
     companion object {

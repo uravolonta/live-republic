@@ -23,6 +23,19 @@ import java.util.concurrent.atomic.AtomicInteger
 /** 테스트용 IVS Stub — 실제 AWS 호출 없이 Channel 생성·중단·Stream 조회를 흉내 낸다. */
 class StubIvsService : IvsService {
     val created = AtomicInteger()
+    val stops = AtomicInteger()
+
+    @Volatile var streamAvailable = true
+
+    @Volatile var failStopsRemaining = 0
+
+    @Volatile var streamIdSuffix = "a"
+
+    fun reset() {
+        streamAvailable = true
+        failStopsRemaining = 0
+        streamIdSuffix = "a"
+    }
 
     override fun createChannel(name: String): IvsChannel {
         val n = created.incrementAndGet()
@@ -34,9 +47,16 @@ class StubIvsService : IvsService {
         )
     }
 
-    override fun stopStream(channelArn: String) = Unit
+    override fun stopStream(channelArn: String) {
+        if (failStopsRemaining > 0) {
+            failStopsRemaining--
+            throw RuntimeException("stub stop failure")
+        }
+        stops.incrementAndGet()
+    }
 
-    override fun currentStreamSessionId(channelArn: String): String = "st-stub-${channelArn.takeLast(4)}"
+    override fun currentStreamSessionId(channelArn: String): String? =
+        if (streamAvailable) "st-stub-${channelArn.takeLast(4)}-$streamIdSuffix" else null
 }
 
 @TestConfiguration(proxyBeanMethods = false)
@@ -150,6 +170,107 @@ class BroadcastFlowTest {
         // 종료된 Live 재시작 거절
         mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
             .andExpect(status().isConflict)
+    }
+
+    @org.junit.jupiter.api.BeforeEach
+    fun resetStub() {
+        stubIvs.reset()
+    }
+
+    @Autowired
+    lateinit var streamSessionRepository: com.liverepublic.server.live.LiveStreamSessionRepository
+
+    @Test
+    fun `STARTING Live는 목록에 보이고 재진입해 재개하거나 취소할 수 있다`() {
+        val session = ownerSession("bc-starting-list@test.local")
+        val p = createProduct(session, "재진입 상품")
+        val liveId = createLiveWithProducts(session, "재진입 방송", listOf(p))
+
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isOk)
+
+        // 앱이 종료돼도 목록에서 STARTING Live가 보인다 (슬롯 점유 중이므로 필수).
+        mockMvc.perform(get("/api/broadcast/lives").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$[0].id").value(liveId))
+            .andExpect(jsonPath("$[0].status").value("STARTING"))
+
+        // 재진입: 상세에서 같은 송출 자격을 다시 받는다 (재개 가능).
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+
+        // 시작 취소 → SCHEDULED 복귀, 서버가 IVS 중단도 시도한다.
+        val stopsBefore = stubIvs.stops.get()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("SCHEDULED"))
+        assert(stubIvs.stops.get() == stopsBefore + 1) { "STARTING 취소에도 IVS 중단을 시도해야 한다" }
+    }
+
+    @Test
+    fun `IVS 감지 지연 시 확정은 409이고 감지 후 재시도가 성공한다`() {
+        val session = ownerSession("bc-confirm-retry@test.local")
+        val p = createProduct(session, "지연 상품")
+        val liveId = createLiveWithProducts(session, "지연 방송", listOf(p))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isOk)
+
+        stubIvs.streamAvailable = false
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+            .andExpect(status().isConflict)
+        // 아직 STARTING이어야 재시도할 수 있다.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.status").value("STARTING"))
+
+        stubIvs.streamAvailable = true
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("LIVE"))
+    }
+
+    @Test
+    fun `IVS 중단 실패 시 종료는 502로 실패하고 재시도로 종료된다`() {
+        val session = ownerSession("bc-stop-fail@test.local")
+        val p = createProduct(session, "중단 실패 상품")
+        val liveId = createLiveWithProducts(session, "중단 실패 방송", listOf(p))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+
+        // 2회 모두 실패 → 종료 확정 없이 502, 상태는 LIVE 유지 (실송출 방치 방지).
+        stubIvs.failStopsRemaining = 2
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isBadGateway)
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.status").value("LIVE"))
+
+        // 사용자 재시도 → 성공 → ENDED.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
+    }
+
+    @Test
+    fun `재연결로 새 Stream Session이 생기면 이력에 추가된다`() {
+        val session = ownerSession("bc-session-history@test.local")
+        val p = createProduct(session, "이력 상품")
+        val liveId = createLiveWithProducts(session, "이력 방송", listOf(p))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+
+        // 재연결 후 새 Stream Session — LIVE 상태에서의 재확정이 새 이력을 추가한다.
+        stubIvs.streamIdSuffix = "b"
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("LIVE"))
+
+        val sessions = streamSessionRepository.findAllByLiveIdOrderById(liveId)
+        assert(sessions.size == 2) { "Stream Session 이력은 2행이어야 한다: ${sessions.map { it.ivsStreamId }}" }
+        assert(sessions[0].endedAt != null) { "이전 Session은 닫혀야 한다" }
+        assert(sessions[1].endedAt == null && sessions[1].ivsStreamId.endsWith("-b"))
+
+        // 종료 시 열린 Session이 닫힌다.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session)).andExpect(status().isOk)
+        assert(streamSessionRepository.findAllByLiveIdOrderById(liveId).all { it.endedAt != null })
     }
 
     @Test

@@ -85,6 +85,7 @@ class LiveListActivity : AppCompatActivity() {
             val label = buildString {
                 append(live.getString("title"))
                 if (status == "LIVE") append("  ● 방송중")
+                if (status == "STARTING") append("  ● 시작 중 — 재진입해 재개·취소")
                 append("\n상품 ${live.getInt("productCount")}개 · ${live.getString("scheduledStartAt").take(16)}")
             }
             listContainer.addView(Button(this).apply {

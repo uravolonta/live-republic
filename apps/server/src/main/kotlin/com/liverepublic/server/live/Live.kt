@@ -100,6 +100,35 @@ class LiveProduct(
     val position: Int,
 )
 
+/** Live 한 번의 방송에서 발생한 IVS Stream Session 이력 (재연결마다 1행). */
+@Entity
+@Table(name = "live_stream_session")
+class LiveStreamSession(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long? = null,
+
+    @Column(name = "live_id", nullable = false)
+    val liveId: Long,
+
+    @Column(name = "ivs_channel_arn", nullable = false)
+    val ivsChannelArn: String,
+
+    @Column(name = "ivs_stream_id", nullable = false)
+    val ivsStreamId: String,
+
+    @Column(name = "started_at", nullable = false)
+    val startedAt: OffsetDateTime,
+
+    @Column(name = "ended_at")
+    var endedAt: OffsetDateTime? = null,
+)
+
+interface LiveStreamSessionRepository : JpaRepository<LiveStreamSession, Long> {
+    fun findAllByLiveIdOrderById(liveId: Long): List<LiveStreamSession>
+    fun findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId: Long): LiveStreamSession?
+}
+
 interface LiveRepository : JpaRepository<Live, Long> {
     fun findAllByShopIdOrderByScheduledStartAtDesc(shopId: Long): List<Live>
     fun findAllByShopIdAndStatusOrderByScheduledStartAtDesc(shopId: Long, status: LiveStatus): List<Live>
