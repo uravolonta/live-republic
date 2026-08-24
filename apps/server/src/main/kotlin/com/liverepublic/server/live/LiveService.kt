@@ -102,7 +102,10 @@ class LiveService(
     }
 
     private fun getMutableLive(userId: Long, liveId: Long): Live {
-        val live = getLive(userId, liveId)
+        // 쓰기 잠금으로 읽어 방송 시작(STARTING/LIVE 전이)과의 경합에서
+        // 스냅샷 flush가 상태·IVS 정보를 되돌리는 것을 막는다.
+        val live = liveRepository.findByIdAndShopIdForUpdate(liveId, productService.ownerShopId(userId))
+            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
         if (live.status != LiveStatus.SCHEDULED) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "예정 상태의 Live만 수정할 수 있습니다. (현재: ${live.status})")
         }

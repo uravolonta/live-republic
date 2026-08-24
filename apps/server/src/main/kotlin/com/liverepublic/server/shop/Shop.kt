@@ -47,4 +47,9 @@ class Shop(
 
 interface ShopRepository : JpaRepository<Shop, Long> {
     fun findByTenantId(tenantId: Long): Shop?
+
+    /** Shop 단위 직렬화(방송 시작 슬롯 선점 등)를 위한 쓰기 잠금 조회. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query("select s from Shop s where s.id = :id")
+    fun findByIdForUpdate(id: Long): Shop?
 }

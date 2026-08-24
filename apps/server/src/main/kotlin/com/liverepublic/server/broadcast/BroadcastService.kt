@@ -75,15 +75,23 @@ class BroadcastService(
     }
 
     /**
-     * 방송 시작: SCHEDULED + 판매 상품 1개 이상일 때만.
-     * IVS Channel을 (없으면) 생성하고 LIVE로 전환한다. 방송 중 Live는 Shop당 최대 1개 —
-     * 잠금과 부분 유일 Index(uq_live_one_active_per_shop)가 보장한다.
+     * 방송 시작 요청: SCHEDULED + 판매 상품 1개 이상일 때만 STARTING으로 전이하고
+     * 송출 자격을 발급한다. 실제 방송 중(LIVE) 확정은 SDK 연결 확인 후 confirm()이 한다.
+     * Shop 행 잠금으로 시작 슬롯을 선점해 동시 시작이 AWS Channel을 중복 생성하지
+     * 못하게 하고, 부분 유일 Index(STARTING·LIVE)가 최종 방어선이다.
+     * STARTING 상태에서 다시 호출하면 재시도로 보고 같은 자격을 반환한다.
      */
     @Transactional
     fun start(userId: Long, liveId: Long): Live {
         val shopId = broadcasterShopId(userId)
+        // Shop 단위 직렬화: AWS Channel 생성 전에 시작 슬롯을 확정한다.
+        shopRepository.findByIdForUpdate(shopId)
+            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
+        if (live.status == LiveStatus.STARTING) {
+            return live // 연결 재시도 — 발급된 자격을 그대로 다시 사용한다.
+        }
         if (live.status != LiveStatus.SCHEDULED) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "예정 상태의 Live만 시작할 수 있습니다. (현재: ${live.status})")
         }
@@ -91,8 +99,10 @@ class BroadcastService(
         if (products.isEmpty()) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "판매 상품이 연결되지 않은 Live는 시작할 수 없습니다.")
         }
-        if (liveRepository.existsByShopIdAndStatus(shopId, LiveStatus.LIVE)) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "이미 방송 중인 Live가 있습니다. 종료 후 시작하세요.")
+        if (liveRepository.existsByShopIdAndStatus(shopId, LiveStatus.STARTING) ||
+            liveRepository.existsByShopIdAndStatus(shopId, LiveStatus.LIVE)
+        ) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, "이미 방송 중이거나 시작 중인 Live가 있습니다.")
         }
 
         if (live.ivsChannelArn == null) {
@@ -102,38 +112,83 @@ class BroadcastService(
             live.ivsStreamKey = channel.streamKey
             live.ivsPlaybackUrl = channel.playbackUrl
         }
-        live.status = LiveStatus.LIVE
-        live.startedAt = OffsetDateTime.now()
+        live.status = LiveStatus.STARTING
         live.startedByUserId = userId
         live.currentLiveProductId = products.first().id
         live.updatedAt = OffsetDateTime.now()
         return try {
             liveRepository.saveAndFlush(live)
         } catch (e: DataIntegrityViolationException) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "이미 방송 중인 Live가 있습니다. 종료 후 시작하세요.")
+            throw ResponseStatusException(HttpStatus.CONFLICT, "이미 방송 중이거나 시작 중인 Live가 있습니다.")
         }
     }
 
-    /** 방송 종료: LIVE → ENDED. IVS 송출도 중단시킨다. */
+    /**
+     * 방송 중 확정: 앱이 SDK 연결(CONNECTED)을 확인한 뒤 호출한다.
+     * IVS에서 실제 Stream Session을 조회해 식별자와 실제 시작 시각을 기록한다.
+     */
+    @Transactional
+    fun confirm(userId: Long, liveId: Long): Live {
+        val shopId = broadcasterShopId(userId)
+        val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
+            ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
+        if (live.status == LiveStatus.LIVE) return live // 중복 확인 허용
+        if (live.status != LiveStatus.STARTING) {
+            throw ResponseStatusException(HttpStatus.CONFLICT, "시작 중인 Live만 방송 중으로 확정할 수 있습니다. (현재: ${live.status})")
+        }
+        val streamSessionId = live.ivsChannelArn?.let { ivsService.currentStreamSessionId(it) }
+            ?: throw ResponseStatusException(HttpStatus.CONFLICT, "IVS에서 송출이 아직 감지되지 않았습니다. 잠시 후 다시 시도하세요.")
+        live.status = LiveStatus.LIVE
+        live.startedAt = OffsetDateTime.now()
+        live.ivsStreamSessionId = streamSessionId
+        live.updatedAt = OffsetDateTime.now()
+        return live
+    }
+
+    /**
+     * 방송 종료: LIVE → ENDED. STARTING이면 시작 취소로 보고 SCHEDULED로 되돌린다.
+     * IVS 송출 중단 실패는 기록하고 1회 재시도한다 — 실패해도 DB 종료는 확정한다
+     * (송출 자체는 앱의 session.stop()이 1차로 중단하며, Stream Key는 더 이상 노출되지 않는다).
+     */
     @Transactional
     fun end(userId: Long, liveId: Long): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
-        if (live.status != LiveStatus.LIVE) {
-            throw ResponseStatusException(HttpStatus.CONFLICT, "방송 중인 Live만 종료할 수 있습니다. (현재: ${live.status})")
+        when (live.status) {
+            LiveStatus.STARTING -> {
+                // 연결 실패 등으로 시작을 취소한다. Channel은 재사용을 위해 유지한다.
+                live.status = LiveStatus.SCHEDULED
+                live.startedByUserId = null
+                live.currentLiveProductId = null
+                live.updatedAt = OffsetDateTime.now()
+                return live
+            }
+            LiveStatus.LIVE -> Unit
+            else -> throw ResponseStatusException(
+                HttpStatus.CONFLICT, "방송 중이거나 시작 중인 Live만 종료할 수 있습니다. (현재: ${live.status})",
+            )
         }
         live.status = LiveStatus.ENDED
         live.endedAt = OffsetDateTime.now()
         live.updatedAt = OffsetDateTime.now()
-        live.ivsChannelArn?.let { arn ->
+        live.ivsChannelArn?.let { arn -> stopStreamWithRetry(arn, liveId) }
+        return live
+    }
+
+    private fun stopStreamWithRetry(channelArn: String, liveId: Long) {
+        repeat(2) { attempt ->
             try {
-                ivsService.stopStream(arn)
+                ivsService.stopStream(channelArn)
+                return
             } catch (e: Exception) {
-                // 송출 중단 실패가 종료 처리를 막지 않는다. 다음 시작 시 새 Channel을 쓰지 않고 재사용한다.
+                log.warn("IVS 송출 중단 실패 (live={}, channel={}, 시도 {}/2): {}", liveId, channelArn, attempt + 1, e.message)
             }
         }
-        return live
+    }
+
+    companion object {
+        private val log = org.slf4j.LoggerFactory.getLogger(BroadcastService::class.java)
     }
 
     /** 방송 중 현재 판매 상품 전환. */

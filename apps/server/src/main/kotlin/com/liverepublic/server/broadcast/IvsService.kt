@@ -20,6 +20,9 @@ data class IvsChannel(
 interface IvsService {
     fun createChannel(name: String): IvsChannel
     fun stopStream(channelArn: String)
+
+    /** 현재 송출 중인 Stream Session 식별자. 송출이 없으면 null. */
+    fun currentStreamSessionId(channelArn: String): String?
 }
 
 /**
@@ -53,6 +56,12 @@ class AwsIvsService(private val region: String) : IvsService {
         } catch (e: software.amazon.awssdk.services.ivs.model.ChannelNotBroadcastingException) {
             // 이미 송출이 끊긴 경우 — 종료 처리에는 문제 없다.
         }
+    }
+
+    override fun currentStreamSessionId(channelArn: String): String? = try {
+        client.getStream { it.channelArn(channelArn) }.stream().streamId()
+    } catch (e: software.amazon.awssdk.services.ivs.model.ChannelNotBroadcastingException) {
+        null
     }
 }
 

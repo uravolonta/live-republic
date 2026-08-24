@@ -13,7 +13,8 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import java.time.OffsetDateTime
 
-enum class LiveStatus { SCHEDULED, LIVE, ENDED, CANCELLED }
+/** STARTING: 시작 요청·송출 자격 발급 후 실제 IVS 연결 확인 대기. 종료 시 SCHEDULED로 복귀한다. */
+enum class LiveStatus { SCHEDULED, STARTING, LIVE, ENDED, CANCELLED }
 
 /**
  * 예정 Live — 변경·취소 가능한 사전 예고. 예정 시각이 지나도 자동으로 상태가 바뀌지 않으며,
@@ -65,6 +66,10 @@ class Live(
 
     @Column(name = "ivs_playback_url")
     var ivsPlaybackUrl: String? = null,
+
+    /** 실제 연결이 확인된 IVS Stream Session 식별자 (사용량 근거 보존). */
+    @Column(name = "ivs_stream_session_id")
+    var ivsStreamSessionId: String? = null,
 
     /** 방송 중 현재 판매 상품 (live_product id). */
     @Column(name = "current_live_product_id")

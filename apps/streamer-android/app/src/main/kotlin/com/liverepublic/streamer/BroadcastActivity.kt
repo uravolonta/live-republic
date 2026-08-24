@@ -42,8 +42,16 @@ class BroadcastActivity : AppCompatActivity() {
     private val sessionListener = object : BroadcastSession.Listener() {
         override fun onStateChanged(state: BroadcastSession.State) {
             runOnUiThread {
-                if (state == BroadcastSession.State.CONNECTED) {
-                    statusText.text = "● 방송중 (송출 연결됨)"
+                when (state) {
+                    BroadcastSession.State.CONNECTED -> {
+                        statusText.text = "● 방송중 (송출 연결됨)"
+                        // 실제 연결이 확인된 뒤에만 서버가 방송 중(LIVE)으로 확정한다.
+                        confirmLive()
+                    }
+                    BroadcastSession.State.DISCONNECTED,
+                    BroadcastSession.State.ERROR,
+                    -> streaming = false // 실제 연결 해제 후에만 재시작을 허용한다.
+                    else -> Unit
                 }
             }
         }
@@ -162,6 +170,7 @@ class BroadcastActivity : AppCompatActivity() {
         val status = live.getString("status")
         statusText.text = when (status) {
             "LIVE" -> "● 방송중 — ${live.getString("title")}"
+            "STARTING" -> "송출 연결 중… — ${live.getString("title")}"
             "SCHEDULED" -> "방송 준비 — ${live.getString("title")}"
             else -> "${live.getString("title")} ($status)"
         }
@@ -200,6 +209,12 @@ class BroadcastActivity : AppCompatActivity() {
                 actionButton.text = "방송 시작"
                 actionButton.setOnClickListener { start() }
                 actionButton.isEnabled = true
+            }
+            "STARTING" -> {
+                actionButton.text = "시작 취소"
+                actionButton.setOnClickListener { end() }
+                actionButton.isEnabled = true
+                startStreamingIfNeeded(live)
             }
             "LIVE" -> {
                 actionButton.text = "방송 종료"
@@ -244,6 +259,27 @@ class BroadcastActivity : AppCompatActivity() {
             streaming = true
         } catch (e: BroadcastException) {
             Toast.makeText(this, "송출 시작 실패: ${e.detail}", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    /** SDK CONNECTED 이후 서버에 방송 중 확정을 요청한다. */
+    private fun confirmLive() {
+        val status = detail?.optString("status")
+        if (status != "STARTING") return
+        lifecycleScope.launch {
+            val result = ApiClient.post("/api/broadcast/lives/$liveId/confirm")
+            if (result.status == 200) {
+                detail = ApiClient.json(result)
+                render()
+            } else if (result.status == 409) {
+                // IVS가 아직 송출을 감지하지 못한 경우 — 잠시 후 한 번 더 시도한다.
+                kotlinx.coroutines.delay(3000)
+                val retry = ApiClient.post("/api/broadcast/lives/$liveId/confirm")
+                if (retry.status == 200) {
+                    detail = ApiClient.json(retry)
+                    render()
+                }
+            }
         }
     }
 

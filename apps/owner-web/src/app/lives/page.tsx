@@ -81,7 +81,7 @@ export default function LivesPage() {
                   <div>
                     <p className="font-semibold">
                       {live.title}
-                      {live.status === "LIVE" && (
+                      {(live.status === "LIVE" || live.status === "STARTING") && (
                         <span className="ml-2 text-sm text-red-500">● 방송중</span>
                       )}
                       {live.status === "ENDED" && (

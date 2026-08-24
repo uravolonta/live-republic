@@ -52,7 +52,7 @@ export type Streamer = {
   mustChangePassword: boolean;
 };
 
-export type LiveStatus = "SCHEDULED" | "LIVE" | "ENDED" | "CANCELLED";
+export type LiveStatus = "SCHEDULED" | "STARTING" | "LIVE" | "ENDED" | "CANCELLED";
 
 export type LiveSummary = {
   id: number;

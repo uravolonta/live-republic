@@ -128,6 +128,13 @@ class BroadcastController(
         @PathVariable liveId: Long,
     ): BroadcastLiveDetail = toDetail(broadcastService.start(user.id, liveId))
 
+    /** SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 실제 Stream Session을 기록한다. */
+    @PostMapping("/lives/{liveId}/confirm")
+    fun confirm(
+        @AuthenticationPrincipal user: AuthUser,
+        @PathVariable liveId: Long,
+    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId))
+
     @PostMapping("/lives/{liveId}/end")
     fun end(
         @AuthenticationPrincipal user: AuthUser,
@@ -159,7 +166,8 @@ class BroadcastController(
                 )
             }
         }
-        val isLive = live.status == LiveStatus.LIVE
+        // 송출 자격은 시작 중(STARTING)·방송 중(LIVE)에만 내려간다.
+        val isLive = live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE
         return BroadcastLiveDetail(
             id = live.id!!,
             title = live.title,
