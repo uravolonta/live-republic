@@ -31,6 +31,7 @@ class BroadcastActivity : AppCompatActivity() {
     private var liveId: Long = 0
     private var session: BroadcastSession? = null
     private var detail: JSONObject? = null
+    private var streaming = false
 
     private lateinit var previewContainer: FrameLayout
     private lateinit var statusText: TextView
@@ -78,6 +79,12 @@ class BroadcastActivity : AppCompatActivity() {
             addView(skuText)
             addView(HorizontalScrollView(context).apply { addView(productBar) })
             addView(actionButton)
+        }
+        // 하단 시스템 내비게이션 바에 버튼이 가려지지 않게 인셋만큼 띄운다.
+        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(overlay) { view, insets ->
+            val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            view.setPadding(0, 0, 0, bars.bottom)
+            insets
         }
 
         setContentView(
@@ -227,11 +234,14 @@ class BroadcastActivity : AppCompatActivity() {
     }
 
     private fun startStreamingIfNeeded(live: JSONObject) {
+        // 상품 전환 등 화면 갱신 때마다 불리므로, 이미 송출 중이면 다시 시작하지 않는다.
+        if (streaming) return
         val ingest = live.optString("ingestEndpoint", "")
         val streamKey = live.optString("streamKey", "")
         if (ingest.isEmpty() || streamKey.isEmpty()) return
         try {
             session?.start(ingest, streamKey)
+            streaming = true
         } catch (e: BroadcastException) {
             Toast.makeText(this, "송출 시작 실패: ${e.detail}", Toast.LENGTH_LONG).show()
         }
@@ -240,6 +250,7 @@ class BroadcastActivity : AppCompatActivity() {
     private fun end() {
         actionButton.isEnabled = false
         session?.stop()
+        streaming = false
         lifecycleScope.launch {
             val result = ApiClient.post("/api/broadcast/lives/$liveId/end")
             if (result.status == 200) {
