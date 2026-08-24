@@ -40,6 +40,13 @@ data class MeResponse(
     val email: String,
     val name: String,
     val shopId: Long?,
+    val mustChangePassword: Boolean,
+    val isStreamer: Boolean,
+)
+
+data class ChangePasswordRequest(
+    @field:NotBlank val currentPassword: String,
+    @field:NotBlank val newPassword: String,
 )
 
 @RestController
@@ -53,7 +60,10 @@ class AuthController(
     @ResponseStatus(HttpStatus.CREATED)
     fun signup(@Valid @RequestBody request: SignupRequest): MeResponse {
         val user = authService.signup(request.email.trim(), request.password, request.name.trim())
-        return MeResponse(id = user.id, email = user.email, name = user.name, shopId = null)
+        return MeResponse(
+            id = user.id, email = user.email, name = user.name, shopId = null,
+            mustChangePassword = false, isStreamer = false,
+        )
     }
 
     @PostMapping("/login")
@@ -67,19 +77,43 @@ class AuthController(
         // 세션 고정 공격 방지를 위해 로그인 시 세션을 새로 발급한다.
         httpRequest.getSession(false)?.invalidate()
         httpRequest.getSession(true)
+        saveAuthentication(user, httpRequest, httpResponse)
 
+        return toMeResponse(user)
+    }
+
+    @PostMapping("/password")
+    fun changePassword(
+        @AuthenticationPrincipal user: AuthUser,
+        @Valid @RequestBody request: ChangePasswordRequest,
+        httpRequest: HttpServletRequest,
+        httpResponse: HttpServletResponse,
+    ): MeResponse {
+        val updated = authService.changePassword(user.id, request.currentPassword, request.newPassword)
+        // Session Principal의 mustChangePassword 상태를 즉시 갱신한다.
+        saveAuthentication(updated, httpRequest, httpResponse)
+        return toMeResponse(updated)
+    }
+
+    private fun saveAuthentication(
+        user: AuthUser,
+        httpRequest: HttpServletRequest,
+        httpResponse: HttpServletResponse,
+    ) {
         val authentication = UsernamePasswordAuthenticationToken(
             user, null, listOf(SimpleGrantedAuthority("ROLE_USER")),
         )
         val context = SecurityContextHolder.createEmptyContext().apply { this.authentication = authentication }
         SecurityContextHolder.setContext(context)
         securityContextRepository.saveContext(context, httpRequest, httpResponse)
-
-        return MeResponse(
-            id = user.id, email = user.email, name = user.name,
-            shopId = authService.findOwnedShopId(user.id),
-        )
     }
+
+    private fun toMeResponse(user: AuthUser): MeResponse = MeResponse(
+        id = user.id, email = user.email, name = user.name,
+        shopId = authService.findOwnedShopId(user.id),
+        mustChangePassword = user.mustChangePassword,
+        isStreamer = authService.isStreamer(user.id),
+    )
 
     @PostMapping("/logout")
     @ResponseStatus(HttpStatus.NO_CONTENT)
@@ -89,9 +123,5 @@ class AuthController(
     }
 
     @GetMapping("/me")
-    fun me(@AuthenticationPrincipal user: AuthUser): MeResponse =
-        MeResponse(
-            id = user.id, email = user.email, name = user.name,
-            shopId = authService.findOwnedShopId(user.id),
-        )
+    fun me(@AuthenticationPrincipal user: AuthUser): MeResponse = toMeResponse(user)
 }

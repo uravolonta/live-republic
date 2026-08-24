@@ -36,7 +36,42 @@ export async function api<T>(
   return { status: res.status, body };
 }
 
-export type Me = { id: number; email: string; name: string; shopId: number | null };
+export type Me = {
+  id: number;
+  email: string;
+  name: string;
+  shopId: number | null;
+  mustChangePassword: boolean;
+  isStreamer: boolean;
+};
+
+export type Streamer = {
+  userId: number;
+  loginId: string;
+  name: string;
+  mustChangePassword: boolean;
+};
+
+export type LiveSummary = {
+  id: number;
+  title: string;
+  status: "SCHEDULED" | "CANCELLED";
+  scheduledStartAt: string;
+  thumbnailUrl: string | null;
+  productCount: number;
+  ready: boolean;
+};
+
+export type LiveDetail = {
+  id: number;
+  title: string;
+  status: "SCHEDULED" | "CANCELLED";
+  scheduledStartAt: string;
+  thumbnailUrl: string | null;
+  products: { productId: number; name: string; price: number; position: number }[];
+  ready: boolean;
+  notReadyReasons: string[];
+};
 
 export type Shop = {
   id: number;

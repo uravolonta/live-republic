@@ -21,11 +21,15 @@ export default function LoginPage() {
       json: { email, password },
     });
     if (res.status === 200 && res.body) {
-      router.replace(res.body.shopId === null ? "/shop/new" : "/");
+      // 이동 우선순위: 비밀번호 변경 강제 → Streamer 안내 → Shop 생성 → 운영 홈
+      if (res.body.mustChangePassword) router.replace("/password");
+      else if (res.body.isStreamer) router.replace("/");
+      else if (res.body.shopId === null) router.replace("/shop/new");
+      else router.replace("/");
       return;
     }
     setSubmitting(false);
-    if (res.status === 401) setError("이메일 또는 비밀번호가 올바르지 않습니다.");
+    if (res.status === 401) setError("로그인 정보가 올바르지 않습니다.");
     else setError("로그인에 실패했습니다. 잠시 후 다시 시도하세요.");
   }
 
@@ -34,9 +38,10 @@ export default function LoginPage() {
       <h1 className="text-xl font-bold">Owner 로그인</h1>
       <form onSubmit={submit} className="flex flex-col gap-3">
         <input
-          type="email"
+          type="text"
           required
-          placeholder="이메일"
+          autoComplete="username"
+          placeholder="이메일 또는 로그인 ID"
           value={email}
           onChange={(e) => setEmail(e.target.value)}
           className="rounded border p-2"

@@ -17,7 +17,13 @@ data class AuthUser(
     val id: Long,
     val email: String,
     val name: String,
-) : java.io.Serializable
+    val mustChangePassword: Boolean = false,
+) : java.io.Serializable {
+    companion object {
+        // 필드가 추가되어도 기존 세션을 읽을 수 있도록 고정한다.
+        private const val serialVersionUID = 1L
+    }
+}
 
 private const val BCRYPT_MAX_PASSWORD_BYTES = 72
 
@@ -58,7 +64,35 @@ class AuthService(
         if (!passwordEncoder.matches(password, user.passwordHash)) {
             throw ResponseStatusException(HttpStatus.UNAUTHORIZED, "이메일 또는 비밀번호가 올바르지 않습니다.")
         }
-        return AuthUser(id = user.id!!, email = user.email, name = user.name)
+        return AuthUser(
+            id = user.id!!, email = user.email, name = user.name,
+            mustChangePassword = user.mustChangePassword,
+        )
+    }
+
+    /** 자신의 비밀번호를 변경한다. 최초 변경 강제 상태를 해제한다. */
+    @Transactional
+    fun changePassword(userId: Long, currentPassword: String, newPassword: String): AuthUser {
+        if (newPassword.toByteArray(Charsets.UTF_8).size > BCRYPT_MAX_PASSWORD_BYTES ||
+            !newPassword.matches(Regex("^[!-~]{8,72}$"))
+        ) {
+            throw ResponseStatusException(
+                HttpStatus.BAD_REQUEST,
+                "비밀번호는 8자 이상의 영문 대소문자, 숫자, 특수문자만 사용할 수 있습니다.",
+            )
+        }
+        // 임시 비밀번호를 그대로 유지하며 변경 강제를 우회하는 것을 막는다.
+        if (newPassword == currentPassword) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "새 비밀번호는 현재 비밀번호와 달라야 합니다.")
+        }
+        val user = userAccountRepository.findById(userId)
+            .orElseThrow { ResponseStatusException(HttpStatus.UNAUTHORIZED, "사용자를 찾을 수 없습니다.") }
+        if (!passwordEncoder.matches(currentPassword, user.passwordHash)) {
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "현재 비밀번호가 올바르지 않습니다.")
+        }
+        user.passwordHash = requireNotNull(passwordEncoder.encode(newPassword))
+        user.mustChangePassword = false
+        return AuthUser(id = user.id!!, email = user.email, name = user.name, mustChangePassword = false)
     }
 
     /** 사용자가 Owner로 속한 Shop의 id. 없으면 null. */
@@ -67,4 +101,9 @@ class AuthService(
         val membership = membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER) ?: return null
         return shopRepository.findByTenantId(membership.tenantId)?.id
     }
+
+    /** STREAMER Membership 보유 여부 (Client가 화면 분기에 사용). */
+    @Transactional(readOnly = true)
+    fun isStreamer(userId: Long): Boolean =
+        membershipRepository.findByUserIdAndRole(userId, MembershipRole.STREAMER) != null
 }

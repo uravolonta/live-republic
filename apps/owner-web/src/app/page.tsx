@@ -30,7 +30,16 @@ export default function Home() {
         return;
       }
       setMe(meRes.body);
+      if (meRes.body.mustChangePassword) {
+        router.replace("/password");
+        return;
+      }
       if (meRes.body.shopId === null) {
+        // Streamer 계정은 Shop을 만들지 않는다 — 안내만 표시한다.
+        if (meRes.body.isStreamer) {
+          setLoading(false);
+          return;
+        }
         router.replace("/shop/new");
         return;
       }
@@ -64,6 +73,21 @@ export default function Home() {
           className="rounded border px-4 py-2 text-sm"
         >
           다시 시도
+        </button>
+      </main>
+    );
+  }
+
+  if (me && me.isStreamer && me.shopId === null) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center gap-3 p-8 text-center">
+        <h1 className="text-xl font-bold">Streamer 계정입니다</h1>
+        <p className="text-sm text-gray-500">
+          {me.name} 님, 방송 시작은 Streamer 앱에서 진행합니다. Shop 운영은 Owner 계정을
+          사용하세요.
+        </p>
+        <button onClick={logout} className="rounded border px-4 py-2 text-sm">
+          로그아웃
         </button>
       </main>
     );
@@ -116,10 +140,22 @@ export default function Home() {
       </section>
 
       <Link
-        href="/products"
+        href="/lives"
         className="rounded-lg bg-black px-4 py-2 text-center text-white"
       >
+        Live 관리
+      </Link>
+      <Link
+        href="/products"
+        className="rounded-lg border px-4 py-2 text-center"
+      >
         상품 관리
+      </Link>
+      <Link
+        href="/streamers"
+        className="rounded-lg border px-4 py-2 text-center"
+      >
+        Streamer 계정
       </Link>
       <Link
         href="/settings"
