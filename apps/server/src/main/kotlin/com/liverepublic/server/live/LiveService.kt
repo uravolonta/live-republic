@@ -56,9 +56,11 @@ class LiveService(
         if (productIds.toSet().size != productIds.size) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 상품을 중복 연결할 수 없습니다.")
         }
-        val ownedProducts = productRepository.findAllById(productIds).filter { it.shopId == live.shopId }
+        // 삭제(soft delete)된 상품은 새로 연결할 수 없다.
+        val ownedProducts = productRepository.findAllById(productIds)
+            .filter { it.shopId == live.shopId && it.deletedAt == null }
         if (ownedProducts.size != productIds.size) {
-            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 Shop의 상품만 연결할 수 있습니다.")
+            throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 Shop의 판매 중인 상품만 연결할 수 있습니다.")
         }
         liveProductRepository.deleteAllByLiveId(liveId)
         liveProductRepository.flush()

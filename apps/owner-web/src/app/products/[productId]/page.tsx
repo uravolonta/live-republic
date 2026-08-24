@@ -23,6 +23,10 @@ export default function ProductDetailPage() {
   const [skuMessage, setSkuMessage] = useState<string | null>(null);
   const [skuError, setSkuError] = useState<string | null>(null);
   const [savingSkuId, setSavingSkuId] = useState<number | null>(null);
+  const [groupsForm, setGroupsForm] = useState<{ name: string; optionsText: string }[]>([]);
+  const [structureMessage, setStructureMessage] = useState<string | null>(null);
+  const [structureError, setStructureError] = useState<string | null>(null);
+  const [savingStructure, setSavingStructure] = useState(false);
 
   const load = useCallback(async () => {
     const res = await api<Product>(`/api/products/${productId}`);
@@ -44,6 +48,12 @@ export default function ProductDetailPage() {
     setDescription(res.body.description ?? "");
     setOnHandInputs(
       Object.fromEntries(res.body.skus.map((s) => [s.id, String(s.onHand)])),
+    );
+    setGroupsForm(
+      (res.body.optionGroups ?? []).map((g) => ({
+        name: g.name,
+        optionsText: g.options.join(", "),
+      })),
     );
   }, [productId, router]);
 
@@ -97,6 +107,69 @@ export default function ProductDetailPage() {
       setSkuError(errorMessage(res.body) ?? "수량을 확인하세요.");
     } else {
       setSkuError("일시적인 오류로 저장하지 못했습니다. 잠시 후 다시 시도하세요.");
+    }
+  }
+
+  async function saveStructure(e: React.FormEvent) {
+    e.preventDefault();
+    setStructureMessage(null);
+    setStructureError(null);
+    const optionGroups = groupsForm.map((g) => ({
+      name: g.name.trim(),
+      options: g.optionsText
+        .split(",")
+        .map((o) => o.trim())
+        .filter((o) => o.length > 0),
+    }));
+    if (optionGroups.some((g) => g.name === "" || g.options.length === 0)) {
+      setStructureError("Option Group 이름과 쉼표로 구분한 Option을 입력하세요.");
+      return;
+    }
+    setSavingStructure(true);
+    const res = await api<Product>(`/api/products/${productId}/options`, {
+      method: "PUT",
+      json: { optionGroups },
+    });
+    setSavingStructure(false);
+    if (res.status === 200 && res.body) {
+      setProduct(res.body);
+      setOnHandInputs(
+        Object.fromEntries(res.body.skus.map((s) => [s.id, String(s.onHand)])),
+      );
+      setGroupsForm(
+        (res.body.optionGroups ?? []).map((g) => ({
+          name: g.name,
+          optionsText: g.options.join(", "),
+        })),
+      );
+      setStructureMessage("Option 구조가 변경되었습니다. 사라진 조합은 보관되고 이력이 유지됩니다.");
+    } else if (res.status === 401) {
+      router.replace("/login");
+    } else if (res.status === 400 || res.status === 409) {
+      setStructureError(errorMessage(res.body) ?? "입력값을 확인하세요.");
+    } else {
+      setStructureError("일시적인 오류로 변경하지 못했습니다. 잠시 후 다시 시도하세요.");
+    }
+  }
+
+  async function deleteProduct() {
+    if (
+      !window.confirm(
+        "이 상품을 삭제할까요? 판매 화면에서 숨겨지며, 이미 발생한 주문·판매 이력은 보존됩니다.",
+      )
+    ) {
+      return;
+    }
+    setStructureError(null);
+    const res = await api(`/api/products/${productId}`, { method: "DELETE" });
+    if (res.status === 204) {
+      router.replace("/products");
+    } else if (res.status === 401) {
+      router.replace("/login");
+    } else if (res.status === 409) {
+      setStructureError(errorMessage(res.body) ?? "확보 수량이 남아 있어 삭제할 수 없습니다.");
+    } else {
+      setStructureError("일시적인 오류로 삭제하지 못했습니다. 잠시 후 다시 시도하세요.");
     }
   }
 
@@ -221,6 +294,78 @@ export default function ProductDetailPage() {
         {skuMessage && <p className="text-sm text-green-600">{skuMessage}</p>}
         {skuError && <p className="text-sm text-red-600">{skuError}</p>}
       </section>
+
+      <form onSubmit={saveStructure} className="flex flex-col gap-3 rounded-lg border p-4">
+        <h2 className="font-semibold">Option 구조 변경</h2>
+        <p className="text-xs text-gray-500">
+          유지되는 조합의 재고는 그대로 남습니다. 사라지는 조합은 보관되어 판매 이력이
+          유지되며, 확보(입금대기) 수량이 있으면 없앨 수 없습니다.
+        </p>
+        {groupsForm.map((g, i) => (
+          <div key={i} className="flex flex-col gap-2 rounded border p-3">
+            <div className="flex items-center justify-between">
+              <span className="text-sm font-medium">Option Group {i + 1}</span>
+              <button
+                type="button"
+                onClick={() => setGroupsForm((prev) => prev.filter((_, j) => j !== i))}
+                className="text-sm text-red-600 underline"
+              >
+                삭제
+              </button>
+            </div>
+            <input
+              type="text"
+              placeholder="그룹 이름 (예: 색상)"
+              maxLength={50}
+              value={g.name}
+              onChange={(e) =>
+                setGroupsForm((prev) =>
+                  prev.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)),
+                )
+              }
+              className="rounded border p-2"
+            />
+            <input
+              type="text"
+              placeholder="옵션들, 쉼표로 구분 (예: 빨강, 파랑)"
+              value={g.optionsText}
+              onChange={(e) =>
+                setGroupsForm((prev) =>
+                  prev.map((x, j) => (j === i ? { ...x, optionsText: e.target.value } : x)),
+                )
+              }
+              className="rounded border p-2"
+            />
+          </div>
+        ))}
+        {groupsForm.length < 3 && (
+          <button
+            type="button"
+            onClick={() =>
+              setGroupsForm((prev) => [...prev, { name: "", optionsText: "" }])
+            }
+            className="rounded border p-2 text-sm"
+          >
+            + Option Group 추가
+          </button>
+        )}
+        {structureMessage && <p className="text-sm text-green-600">{structureMessage}</p>}
+        {structureError && <p className="text-sm text-red-600">{structureError}</p>}
+        <button
+          type="submit"
+          disabled={savingStructure}
+          className="rounded bg-black p-2 text-white disabled:opacity-50"
+        >
+          구조 변경 저장
+        </button>
+      </form>
+
+      <button
+        onClick={deleteProduct}
+        className="rounded-lg border border-red-600 p-2 text-red-600"
+      >
+        상품 삭제
+      </button>
     </main>
   );
 }

@@ -98,4 +98,5 @@ export type Product = {
   price: number;
   description: string | null;
   skus: Sku[];
+  optionGroups?: { name: string; options: string[] }[] | null;
 };
