@@ -92,6 +92,21 @@ class BroadcastUiTest {
     }
 
     @Test
+    fun `뒤로가기 차단 - 이 단말이 실제 송출에 관여할 때만`() {
+        // 임대 보유 또는 송출 세션 진행 중 → 종료 확인 다이얼로그
+        assertTrue(BroadcastUi.shouldBlockExit("LIVE", canControl = true, sessionStarted = true, endRequested = false))
+        assertTrue(BroadcastUi.shouldBlockExit("STARTING", canControl = true, sessionStarted = false, endRequested = false))
+        // 종료 요청 후에는 결과를 확인할 때까지 화면을 유지한다
+        assertTrue(BroadcastUi.shouldBlockExit("LIVE", canControl = false, sessionStarted = false, endRequested = true))
+        // 열람만 하는 Owner 단말 — 나가기가 방송을 끊으면 안 된다
+        assertFalse(BroadcastUi.shouldBlockExit("LIVE", canControl = false, sessionStarted = false, endRequested = false))
+        // 인수당해 송출이 멈춘 구 단말 — 종료가 403이라 다이얼로그를 띄우면 화면에 갇힌다
+        assertFalse(BroadcastUi.shouldBlockExit("LIVE", canControl = false, sessionStarted = false, endRequested = false))
+        assertFalse(BroadcastUi.shouldBlockExit("SCHEDULED", canControl = true, sessionStarted = false, endRequested = false))
+        assertFalse(BroadcastUi.shouldBlockExit("ENDED", canControl = true, sessionStarted = true, endRequested = false))
+    }
+
+    @Test
     fun `연결 상태별 표시 문구`() {
         assertTrue(BroadcastUi.statusLabel("LIVE", "t", "CONNECTED").contains("방송중"))
         assertTrue(BroadcastUi.statusLabel("LIVE", "t", "CONNECTING").contains("재연결"))

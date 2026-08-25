@@ -82,4 +82,18 @@ object BroadcastUi {
      */
     fun nextSwitch(pendingId: Long?, attemptedId: Long, succeeded: Boolean): Long? =
         pendingId?.takeIf { it != attemptedId || !succeeded }
+
+    /**
+     * 뒤로가기를 종료 확인 다이얼로그로 막아야 하는가 — 이 단말이 실제 송출에 관여할 때만.
+     * 열람만 하는 Owner 단말이나 인수당해 송출이 멈춘 구 단말은 그냥 나갈 수 있어야 한다 —
+     * 전자는 '종료 후 나가기'가 진행 중 방송을 실제로 끊는 파괴적 동작이 되고,
+     * 후자는 종료가 403으로 계속 실패해 화면에 갇힌다.
+     */
+    fun shouldBlockExit(
+        status: String,
+        canControl: Boolean,
+        sessionStarted: Boolean,
+        endRequested: Boolean,
+    ): Boolean =
+        (status == "STARTING" || status == "LIVE") && (canControl || sessionStarted || endRequested)
 }

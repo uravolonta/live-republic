@@ -32,6 +32,13 @@ interface IvsService {
 
     /** Stream Key 폐기 — 자동 재연결을 포함해 해당 Key의 송출을 영구 차단한다. */
     fun deleteStreamKey(streamKeyArn: String)
+
+    /**
+     * Channel의 실제 Stream Key 목록. 회전 트랜잭션이 부분 실패(예: stopStream 실패로
+     * 롤백)하면 DB의 ARN과 IVS 실제 상태가 어긋날 수 있어, 회전은 이 목록을 기준으로
+     * 정리한다 (Channel당 Key 1개 한도).
+     */
+    fun listStreamKeyArns(channelArn: String): List<String>
 }
 
 /**
@@ -72,6 +79,9 @@ class AwsIvsService(private val region: String) : IvsService {
             // 이미 폐기된 Key — 목적은 달성됐다.
         }
     }
+
+    override fun listStreamKeyArns(channelArn: String): List<String> =
+        client.listStreamKeys { it.channelArn(channelArn) }.streamKeys().map { it.arn() }
 
     override fun stopStream(channelArn: String) {
         try {

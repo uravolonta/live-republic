@@ -76,6 +76,8 @@ object ApiClient {
                     response.headers.toMultimap().mapValues { it.value.last() },
                 )
             }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e // 코루틴 취소는 삼키지 않는다
         } catch (e: Exception) {
             // 통신 단절은 status 0으로 구조화한다 (Owner Web과 같은 규칙).
             ApiResult(0, "")

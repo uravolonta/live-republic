@@ -43,7 +43,7 @@ class GuerrillaActivity : AppCompatActivity() {
                 if (live != null) {
                     startActivity(
                         Intent(this@GuerrillaActivity, BroadcastActivity::class.java)
-                            .putExtra("liveId", live.getLong("id")),
+                            .putExtra("liveId", live.optLong("id")),
                     )
                     finish()
                 } else if (result.status == 401) {
@@ -89,11 +89,11 @@ class GuerrillaActivity : AppCompatActivity() {
                 return@launch
             }
             for (i in 0 until products.length()) {
-                val product = products.getJSONObject(i)
+                val product = products.optJSONObject(i) ?: continue
                 val check = CheckBox(this@GuerrillaActivity).apply {
-                    text = "${product.getString("name")} · ${product.getInt("price")}원"
+                    text = "${product.optString("name")} · ${product.optInt("price")}원"
                 }
-                checks += product.getLong("productId") to check
+                checks += product.optLong("productId") to check
                 productContainer.addView(check)
             }
             if (products.length() == 0) {

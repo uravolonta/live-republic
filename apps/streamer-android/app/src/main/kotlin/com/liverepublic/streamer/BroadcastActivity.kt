@@ -46,6 +46,15 @@ class BroadcastActivity : AppCompatActivity() {
     private var broadcastToken: String? = null
     private var pendingSwitchId: Long? = null
     private var switching = false
+    /**
+     * 조작(start/confirm/switch) 결과가 detail에 반영된 세대. 그 이전에 발사된 폴/조회
+     * 응답은 버린다 — 낡은 SCHEDULED 응답이 방금 시작한 송출을 덮어써 끊는 경합 방지.
+     */
+    private var mutationGeneration = 0
+    /** CONNECTED 이후 서버 확정이 아직 필요한가 — 폴마다 confirm을 반복하지 않기 위한 플래그. */
+    private var needsConfirm = false
+    /** 상품 바 재구성 판단용 — 매 폴마다 재구성하면 스크롤 위치가 리셋되고 터치가 유실된다. */
+    private var productBarSignature: String? = null
 
     private lateinit var previewContainer: FrameLayout
     private lateinit var statusText: TextView
@@ -58,10 +67,12 @@ class BroadcastActivity : AppCompatActivity() {
             runOnUiThread {
                 connectionState = state.name
                 when (state) {
-                    BroadcastSession.State.CONNECTED ->
+                    BroadcastSession.State.CONNECTED -> {
                         // 실제 연결이 확인된 뒤에만 서버가 방송 중으로 확정한다.
                         // (재연결 시에도 호출되어 새 Stream Session이 이력에 기록된다.)
+                        needsConfirm = true
                         confirmLive()
+                    }
                     // DISCONNECTED/ERROR에서도 sessionStarted는 유지한다 —
                     // autoReconnect가 같은 세션 안에서 재시도하므로 start를 다시 부르면 안 된다.
                     else -> Unit
@@ -131,11 +142,18 @@ class BroadcastActivity : AppCompatActivity() {
 
         // 방송 중 화면이 꺼지지 않게 유지한다 (정책: 방송은 이 화면에서만 송출).
         window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        // 방송·시작 중에는 실수로 뒤로 가기를 눌러 송출이 끊기지 않도록 확인을 받는다.
+        // 이 단말이 실제 송출에 관여할 때만 뒤로 가기에 종료 확인을 받는다. 열람 단말이나
+        // 인수당한 구 단말은 그냥 나간다 — 다이얼로그를 강제하면 열람 Owner는 실수로
+        // 방송을 끊게 되고, 임대 없는 단말은 종료가 403이라 화면에 갇힌다.
         onBackPressedDispatcher.addCallback(this) {
-            val status = detail?.optString("status")
-            // 서버 종료 없이 나가는 선택지는 제공하지 않는다 — 나가려면 방송을 함께 종료한다.
-            if (status == "LIVE" || status == "STARTING") {
+            val live = detail
+            if (BroadcastUi.shouldBlockExit(
+                    live?.optString("status") ?: "",
+                    live?.optBoolean("canControl") == true,
+                    sessionStarted, endRequested,
+                )
+            ) {
+                // 서버 종료 없이 나가는 선택지는 제공하지 않는다 — 나가려면 방송을 함께 종료한다.
                 android.app.AlertDialog.Builder(this@BroadcastActivity)
                     .setMessage("방송 중입니다. 나가려면 방송을 종료해야 합니다.")
                     .setPositiveButton("방송 종료 후 나가기") { _, _ -> end() }
@@ -214,6 +232,12 @@ class BroadcastActivity : AppCompatActivity() {
 
     /** 카메라 미리보기를 붙이고 Live 상태를 불러온다. */
     private fun setUp() {
+        createSession()
+        refresh()
+        startPolling()
+    }
+
+    private fun createSession() {
         // BASIC Channel 한도(480p 초과 시 최대 3.5Mbps)에 맞춘 커스텀 설정 — 공유 프리셋을
         // 변경하지 않는 독립 객체다. 720p/30fps (2026-08-24 결정) + 자동 재연결.
         val config = com.amazonaws.ivs.broadcast.BroadcastConfiguration().apply {
@@ -241,13 +265,25 @@ class BroadcastActivity : AppCompatActivity() {
                 Toast.makeText(this, "카메라 미리보기를 열 수 없습니다.", Toast.LENGTH_LONG).show()
             }
         }
-        refresh()
-        startPolling()
+    }
+
+    /**
+     * fatal 오류·재연결 포기 후 같은 세션 인스턴스의 start 재호출을 SDK가 보증하지
+     * 않으므로, 재개 시 세션을 새로 만든다.
+     */
+    private fun recreateSession() {
+        session?.release()
+        session = null
+        previewContainer.removeAllViews()
+        createSession()
     }
 
     private fun refresh() {
         lifecycleScope.launch {
+            val generation = mutationGeneration
             val result = ApiClient.get("/api/broadcast/lives/$liveId", leaseHeaders())
+            // 조회 중 조작이 완료됐다면 이 응답은 낡았다 — 버린다 (폴링이 곧 따라잡는다).
+            if (generation != mutationGeneration) return@launch
             val live = if (result.status == 200) ApiClient.json(result) else null
             when {
                 live != null -> {
@@ -263,14 +299,18 @@ class BroadcastActivity : AppCompatActivity() {
                     ).show()
                     finish()
                 }
-                else -> {
-                    // 일시적 실패(오프라인·서버 오류·손상 응답) — 화면을 닫으면 종료 재시도
-                    // 버튼까지 잃는다. 재시도 버튼을 남긴다.
+                detail == null -> {
+                    // 최초 진입 실패 — 화면을 닫으면 종료 재시도 버튼까지 잃으므로 재시도를 준다.
                     statusText.text = "Live 정보를 불러오지 못했습니다 — 연결을 확인하세요"
                     actionButton.text = "다시 불러오기"
                     actionButton.isEnabled = true
                     actionButton.setOnClickListener { refresh() }
                 }
+                else ->
+                    // 방송 중의 일시적 조회 실패 — 기존 버튼(종료 등)을 유지하고 안내만 한다.
+                    Toast.makeText(
+                        this@BroadcastActivity, "상태를 갱신하지 못했습니다. 연결을 확인하세요.", Toast.LENGTH_SHORT,
+                    ).show()
             }
         }
     }
@@ -287,7 +327,11 @@ class BroadcastActivity : AppCompatActivity() {
                 if (isFinishing) return@launch
                 val status = detail?.optString("status")
                 if (status == "ENDED" || status == "CANCELLED") return@launch
+                val generation = mutationGeneration
                 val result = ApiClient.get("/api/broadcast/lives/$liveId", leaseHeaders())
+                // 폴 도중 조작(start 등)이 완료됐다면 이 응답은 낡았다 — 적용하면
+                // 방금 시작한 송출을 SCHEDULED 스냅숏이 덮어써 끊는다.
+                if (generation != mutationGeneration) continue
                 if (result.status == 200) {
                     ApiClient.json(result)?.let {
                         detail = it
@@ -328,10 +372,43 @@ class BroadcastActivity : AppCompatActivity() {
         val status = live.optString("status")
         updateStatusText()
 
-        // 상품 전환 Layer
-        productBar.removeAllViews()
+        val canControl = live.optBoolean("canControl")
+        renderProductBar(live, canControl)
+
+        // 시작/종료 버튼 — 서버가 내려준 capability로 이 단말이 할 수 있는 일만 노출한다.
+        val canBroadcast = live.optBoolean("canBroadcast")
+        val canForceEnd = live.optBoolean("canForceEnd")
+        val (label, enabled, actionKind) = BroadcastUi.action(status, canControl, canBroadcast, canForceEnd, endRequested)
+        actionButton.text = label
+        actionButton.isEnabled = enabled
+        // 클릭 동작은 라벨과 같은 규칙(BroadcastUi.action)에서 결정된다 — 별도 분기로
+        // 배선하면 라벨과 동작이 어긋날 수 있다.
+        when (actionKind) {
+            // SCHEDULED의 시작, 임대 잃은 시작-계정 단말의 재개(start 재호출로 임대 갱신).
+            BroadcastUi.ACTION_START -> actionButton.setOnClickListener { start() }
+            BroadcastUi.ACTION_END -> actionButton.setOnClickListener { end() }
+            else -> actionButton.setOnClickListener(null)
+        }
+        if (status == "STARTING" || status == "LIVE") {
+            // 임대를 보유한 단말만 송출·확정을 진행한다.
+            if (canControl) {
+                startStreamingIfNeeded(live)
+                // 확정은 연결 이벤트당 1회면 충분하다 — 폴마다 반복하면 서버가 매번
+                // IVS GetStream을 호출해 읽기 한도를 잠식한다.
+                if (connectionState == "CONNECTED" && needsConfirm) confirmLive()
+            }
+        }
+    }
+
+    /** 상품 바·재고 표시 — 내용이 실제로 바뀐 경우만 재구성해 스크롤 위치·터치를 보존한다. */
+    private fun renderProductBar(live: JSONObject, canControl: Boolean) {
         val products = live.optJSONArray("products") ?: org.json.JSONArray()
         val currentId = if (live.isNull("currentLiveProductId")) null else live.optLong("currentLiveProductId")
+        val signature = "$products|$currentId|$canControl"
+        if (signature == productBarSignature) return
+        productBarSignature = signature
+
+        productBar.removeAllViews()
         var currentSkuSummary = "현재 판매 상품이 없습니다"
         for (i in 0 until products.length()) {
             val product = products.optJSONObject(i) ?: continue
@@ -351,37 +428,12 @@ class BroadcastActivity : AppCompatActivity() {
             productBar.addView(Button(this).apply {
                 isAllCaps = false
                 text = (if (isCurrent) "● " else "") + product.optString("name")
+                // 임대가 없는 단말에는 상품 전환을 비활성화한다 (서버도 403으로 차단).
+                isEnabled = canControl
                 setOnClickListener { switchProduct(liveProductId) }
             })
         }
         skuText.text = currentSkuSummary
-
-        // 시작/종료 버튼 — 서버가 내려준 capability로 이 단말이 할 수 있는 일만 노출한다.
-        val canControl = live.optBoolean("canControl")
-        val canBroadcast = live.optBoolean("canBroadcast")
-        val canForceEnd = live.optBoolean("canForceEnd")
-        val (label, enabled, actionKind) = BroadcastUi.action(status, canControl, canBroadcast, canForceEnd, endRequested)
-        actionButton.text = label
-        actionButton.isEnabled = enabled
-        // 클릭 동작은 라벨과 같은 규칙(BroadcastUi.action)에서 결정된다 — 별도 분기로
-        // 배선하면 라벨과 동작이 어긋날 수 있다.
-        when (actionKind) {
-            // SCHEDULED의 시작, 임대 잃은 시작-계정 단말의 재개(start 재호출로 임대 갱신).
-            BroadcastUi.ACTION_START -> actionButton.setOnClickListener { start() }
-            BroadcastUi.ACTION_END -> actionButton.setOnClickListener { end() }
-            else -> actionButton.setOnClickListener(null)
-        }
-        if (status == "STARTING" || status == "LIVE") {
-            // 임대를 보유한 단말만 송출·확정을 진행한다.
-            if (canControl) {
-                startStreamingIfNeeded(live)
-                if (connectionState == "CONNECTED") confirmLive()
-            }
-        }
-        // 임대가 없는 단말에는 상품 전환 버튼을 비활성화한다 (서버도 403으로 차단).
-        if (!canControl) {
-            for (i in 0 until productBar.childCount) productBar.getChildAt(i).isEnabled = false
-        }
     }
 
     private fun leaseHeaders(): Map<String, String> =
@@ -393,14 +445,18 @@ class BroadcastActivity : AppCompatActivity() {
             val result = ApiClient.post("/api/broadcast/lives/$liveId/start")
             val live = if (result.status == 200) ApiClient.json(result) else null
             if (live != null) {
+                mutationGeneration++ // 이전에 발사된 폴 응답이 이 결과를 덮어쓰지 못하게
                 detail = live
                 // 송출 임대 토큰 — 이 단말만 Stream Key·조작 권한을 가진다.
                 live.optString("broadcastToken", "").takeIf { it.isNotEmpty() }?.let { token ->
                     broadcastToken = token
                     BroadcastLease.save(this@BroadcastActivity, liveId, token)
                 }
-                // 명시적 재개이므로 이전 실패 상태를 지워 송출 시작을 허용한다.
-                if (connectionState == "ERROR") connectionState = null
+                if (connectionState == "ERROR") {
+                    // 명시적 재개 — 실패한 세션은 재사용을 보증할 수 없으므로 새로 만든다.
+                    connectionState = null
+                    recreateSession()
+                }
                 render()
             } else {
                 actionButton.isEnabled = true
@@ -449,7 +505,9 @@ class BroadcastActivity : AppCompatActivity() {
             while (System.currentTimeMillis() < deadline) {
                 val result = ApiClient.post("/api/broadcast/lives/$liveId/confirm", headers = leaseHeaders())
                 if (result.status == 200) {
+                    needsConfirm = false
                     ApiClient.json(result)?.let {
+                        mutationGeneration++
                         detail = it
                         render()
                     }
@@ -482,6 +540,12 @@ class BroadcastActivity : AppCompatActivity() {
                 Toast.makeText(this@BroadcastActivity, "방송이 종료되었습니다.", Toast.LENGTH_SHORT).show()
                 finish()
             } else {
+                if (result.status == 403) {
+                    // 이 단말에는 종료 권한이 없다(임대 상실 등) — 종료 의도를 되돌려
+                    // capability 기반 화면(재개·열람·나가기)으로 복귀시킨다. 유지하면
+                    // 버튼이 영구히 '종료 재시도'가 되어 화면에 갇힌다.
+                    endRequested = false
+                }
                 actionButton.isEnabled = true
                 Toast.makeText(
                     this@BroadcastActivity,
@@ -511,6 +575,7 @@ class BroadcastActivity : AppCompatActivity() {
                 )
                 val live = if (result.status == 200) ApiClient.json(result) else null
                 if (live != null) {
+                    mutationGeneration++
                     detail = live
                     render()
                     succeeded = true

@@ -49,6 +49,8 @@ class LoginActivity : AppCompatActivity() {
                         } else {
                             startActivity(Intent(this@LoginActivity, LiveListActivity::class.java))
                         }
+                        // 로그인 폼이 백스택에 남지 않게 한다 (뒤로 가기로 되돌아오지 않도록).
+                        finish()
                     }
                     result.status == 401 -> toast("로그인 정보가 올바르지 않습니다.")
                     result.status == 0 -> toast("서버에 연결할 수 없습니다.")

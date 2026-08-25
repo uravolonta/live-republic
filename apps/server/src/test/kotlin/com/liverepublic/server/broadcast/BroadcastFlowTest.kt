@@ -40,25 +40,37 @@ class StubIvsService : IvsService {
     val keysCreated = AtomicInteger()
     val keysDeleted = AtomicInteger()
 
+    /** Channel별 실제 존재하는 Key ARN — 회전 부분 실패의 고아 Key를 재현하기 위한 상태. */
+    val channelKeys = java.util.concurrent.ConcurrentHashMap<String, MutableList<String>>()
+
     override fun createChannel(name: String): IvsChannel {
         val n = created.incrementAndGet()
+        val channelArn = "arn:aws:ivs:stub:channel/$name-$n"
+        val keyArn = "arn:aws:ivs:stub:stream-key/$name-$n"
+        channelKeys[channelArn] = mutableListOf(keyArn)
         return IvsChannel(
-            channelArn = "arn:aws:ivs:stub:channel/$name-$n",
+            channelArn = channelArn,
             ingestEndpoint = "rtmps://stub.ingest:443/app/",
             streamKey = "sk_stub_$n",
-            streamKeyArn = "arn:aws:ivs:stub:stream-key/$name-$n",
+            streamKeyArn = keyArn,
             playbackUrl = "https://stub.playback/$name.m3u8",
         )
     }
 
     override fun createStreamKey(channelArn: String): IvsStreamKey {
         val n = keysCreated.incrementAndGet()
-        return IvsStreamKey(arn = "arn:aws:ivs:stub:stream-key/re-$n", value = "sk_stub_re_$n")
+        val arn = "arn:aws:ivs:stub:stream-key/re-$n"
+        channelKeys.getOrPut(channelArn) { mutableListOf() }.add(arn)
+        return IvsStreamKey(arn = arn, value = "sk_stub_re_$n")
     }
 
     override fun deleteStreamKey(streamKeyArn: String) {
         keysDeleted.incrementAndGet()
+        channelKeys.values.forEach { it.remove(streamKeyArn) }
     }
+
+    override fun listStreamKeyArns(channelArn: String): List<String> =
+        channelKeys[channelArn].orEmpty().toList()
 
     override fun stopStream(channelArn: String) {
         if (failStopsRemaining > 0) {
@@ -585,6 +597,35 @@ class BroadcastFlowTest {
         mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session).header("X-Broadcast-Token", tokenB))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("ENDED"))
+    }
+
+    @Test
+    fun `회전이 stopStream 실패로 롤백돼도 재시도가 고아 Key를 정리하고 성공한다`() {
+        val session = ownerSession("bc-orphan@test.local")
+        val p = createProduct(session, "고아 키 상품")
+        val liveId = createLiveWithProducts(session, "고아 키 방송", listOf(p))
+        val token = startLive(session, liveId)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(status().isOk)
+        val channelArn = stubIvs.channelKeys.keys.first { it.contains("live-republic-$liveId") }
+
+        // 회전 중 stopStream 2회 실패 → 502, 트랜잭션 롤백. IVS에는 구 Key 삭제 +
+        // 고아 신 Key가 남고, DB는 이미 삭제된 구 Key ARN으로 돌아간다.
+        stubIvs.failStopsRemaining = 2
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isBadGateway)
+        assert(stubIvs.channelKeys[channelArn]!!.size == 1) { "고아 Key 1개가 남아야 한다" }
+
+        // 재시도 — ARN 기반 폐기라면 고아 Key 때문에 Channel당 1개 한도에 걸리지만,
+        // 실제 목록 기반 정리는 고아를 지우고 새 Key를 발급한다.
+        stubIvs.failStopsRemaining = 0
+        val body = mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isOk).andReturn().response.contentAsString
+        val newToken = mapper.readTree(body).get("broadcastToken").asText()
+        assert(stubIvs.channelKeys[channelArn]!!.size == 1) { "Channel의 Key는 정확히 1개여야 한다" }
+
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session).header("X-Broadcast-Token", newToken))
+            .andExpect(status().isOk)
     }
 
     @Test

@@ -94,13 +94,13 @@ class LiveListActivity : AppCompatActivity() {
             return
         }
         for (i in 0 until lives.length()) {
-            val live = lives.getJSONObject(i)
-            val status = live.getString("status")
+            val live = lives.optJSONObject(i) ?: continue
+            val status = live.optString("status")
             val label = buildString {
-                append(live.getString("title"))
+                append(live.optString("title"))
                 if (status == "LIVE") append("  ● 방송중")
                 if (status == "STARTING") append("  ● 시작 중 — 재진입해 재개·취소")
-                append("\n상품 ${live.getInt("productCount")}개 · ${Formats.localDateTime(live.getString("scheduledStartAt"))}")
+                append("\n상품 ${live.optInt("productCount")}개 · ${Formats.localDateTime(live.optString("scheduledStartAt"))}")
             }
             listContainer.addView(Button(this).apply {
                 text = label
@@ -108,7 +108,7 @@ class LiveListActivity : AppCompatActivity() {
                 setOnClickListener {
                     startActivity(
                         Intent(this@LiveListActivity, BroadcastActivity::class.java)
-                            .putExtra("liveId", live.getLong("id")),
+                            .putExtra("liveId", live.optLong("id")),
                     )
                 }
             })

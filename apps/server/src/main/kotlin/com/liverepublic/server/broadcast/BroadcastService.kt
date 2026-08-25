@@ -107,7 +107,7 @@ class BroadcastService(
             // 회전만으로는 새 단말이 송출을 시작할 수 없다. Stream Key를 회전(폐기→재발급)해
             // 이전 단말의 재연결을 막고 현재 송출을 중단해 자리를 비운다.
             live.ivsChannelArn?.let { channelArn ->
-                live.ivsStreamKeyArn?.let { keyArn -> deleteStreamKeyOrThrow(keyArn, liveId) }
+                deleteAllStreamKeysOrThrow(channelArn, liveId)
                 live.ivsStreamKey = null
                 live.ivsStreamKeyArn = null
                 val key = ivsService.createStreamKey(channelArn)
@@ -139,7 +139,9 @@ class BroadcastService(
             live.ivsPlaybackUrl = channel.playbackUrl
         } else if (live.ivsStreamKey == null || live.ivsStreamKeyArn == null) {
             // 이전 종료에서 Key를 폐기했거나(V15 이전) ARN이 없어 폐기 불가능한 Key는
-            // 신뢰하지 않고 새 Key를 발급한다.
+            // 신뢰하지 않고 새 Key를 발급한다. 이전 회전이 부분 실패로 남긴 고아 Key가
+            // 있을 수 있으므로(Channel당 1개 한도) 실제 목록을 먼저 정리한다.
+            deleteAllStreamKeysOrThrow(live.ivsChannelArn!!, liveId)
             val key = ivsService.createStreamKey(live.ivsChannelArn!!)
             live.ivsStreamKey = key.value
             live.ivsStreamKeyArn = key.arn
@@ -282,6 +284,24 @@ class BroadcastService(
         if (!isShopOwner(live, userId)) {
             throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송을 시작한 단말 또는 Owner만 종료할 수 있습니다.")
         }
+    }
+
+    /**
+     * Channel의 실제 Stream Key를 전부 폐기한다. DB에 저장된 ARN 대신 IVS 목록을
+     * 기준으로 삼는다 — 이전 회전이 stopStream 실패로 롤백됐다면 DB의 ARN은 이미
+     * 삭제된 구 Key이고 IVS에는 고아 신 Key가 남아, ARN 기반 폐기로는 이후
+     * createStreamKey가 Channel당 1개 한도에 계속 걸린다.
+     */
+    private fun deleteAllStreamKeysOrThrow(channelArn: String, liveId: Long) {
+        val arns = try {
+            ivsService.listStreamKeyArns(channelArn)
+        } catch (e: Exception) {
+            log.error("IVS Stream Key 목록 조회 실패 (live={}, channel={}): {}", liveId, channelArn, e.message)
+            throw ResponseStatusException(
+                HttpStatus.BAD_GATEWAY, "송출 자격 조회에 실패했습니다. 잠시 후 다시 시도하세요.", e,
+            )
+        }
+        arns.forEach { deleteStreamKeyOrThrow(it, liveId) }
     }
 
     private fun deleteStreamKeyOrThrow(streamKeyArn: String, liveId: Long) {
