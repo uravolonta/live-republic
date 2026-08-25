@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
 import org.springframework.web.bind.annotation.PutMapping
 import org.springframework.web.bind.annotation.RequestBody
+import org.springframework.web.bind.annotation.RequestHeader
 import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.ResponseStatus
 import org.springframework.web.bind.annotation.RestController
@@ -58,10 +59,16 @@ data class BroadcastLiveDetail(
     val endedAt: OffsetDateTime?,
     val currentLiveProductId: Long?,
     val products: List<BroadcastProductInfo>,
-    /** STARTING·LIVE 상태에서 방송을 시작한 계정에만 내려간다 (송출 재개용, 가로채기 방지). */
+    /** 임대 토큰을 제시한 방송 단말에만 내려간다 (송출 가로채기 방지). */
     val ingestEndpoint: String?,
     val streamKey: String?,
     val playbackUrl: String?,
+    /** start 응답에서만 내려가는 송출 임대 토큰 — 단말이 보관하고 이후 요청 헤더로 제시한다. */
+    val broadcastToken: String? = null,
+    /** 이 요청 단말·계정이 할 수 있는 것 — 화면은 이 값으로 버튼을 제어한다. */
+    val canBroadcast: Boolean = false,
+    val canControl: Boolean = false,
+    val canForceEnd: Boolean = false,
 )
 
 @RestController
@@ -120,35 +127,44 @@ class BroadcastController(
     fun detail(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.getLive(user.id, liveId), user.id)
+        @RequestHeader(name = BROADCAST_TOKEN_HEADER, required = false) token: String?,
+    ): BroadcastLiveDetail = toDetail(broadcastService.getLive(user.id, liveId), user.id, token)
 
     @PostMapping("/lives/{liveId}/start")
     fun start(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.start(user.id, liveId), user.id)
+    ): BroadcastLiveDetail {
+        val result = broadcastService.start(user.id, liveId)
+        return toDetail(result.live, user.id, result.broadcastToken)
+            .copy(broadcastToken = result.broadcastToken)
+    }
 
-    /** SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 실제 Stream Session을 기록한다. */
+    /** SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 방송 단말(임대 토큰)만 호출할 수 있다. */
     @PostMapping("/lives/{liveId}/confirm")
     fun confirm(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId), user.id)
+        @RequestHeader(name = BROADCAST_TOKEN_HEADER, required = false) token: String?,
+    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId, token), user.id, token)
 
     @PostMapping("/lives/{liveId}/end")
     fun end(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.end(user.id, liveId), user.id)
+        @RequestHeader(name = BROADCAST_TOKEN_HEADER, required = false) token: String?,
+    ): BroadcastLiveDetail = toDetail(broadcastService.end(user.id, liveId, token), user.id, token)
 
     @PutMapping("/lives/{liveId}/current-product")
     fun switchProduct(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
+        @RequestHeader(name = BROADCAST_TOKEN_HEADER, required = false) token: String?,
         @Valid @RequestBody request: SwitchProductRequest,
-    ): BroadcastLiveDetail = toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId), user.id)
+    ): BroadcastLiveDetail =
+        toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId, token), user.id, token)
 
-    private fun toDetail(live: Live, requesterId: Long): BroadcastLiveDetail {
+    private fun toDetail(live: Live, requesterId: Long, token: String? = null): BroadcastLiveDetail {
         val liveProducts = broadcastService.activeLiveProducts(live.id!!)
         val products = productRepository.findAllById(liveProducts.map { it.productId }).associateBy { it.id }
         val skusByProduct = productService.listSkusByProducts(liveProducts.map { it.productId })
@@ -166,10 +182,11 @@ class BroadcastController(
                 )
             }
         }
-        // 송출 자격은 시작 중(STARTING)·방송 중(LIVE)에, 그리고 방송을 시작한 계정에만
-        // 내려간다 — 같은 Shop의 다른 단말이 같은 Key로 송출을 가로채는 것을 막는다.
-        val isLive = (live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE) &&
-            live.startedByUserId == requesterId
+        // 송출 자격은 시작 중(STARTING)·방송 중(LIVE)에, 그리고 임대 토큰을 제시한
+        // 방송 단말에만 내려간다 — 같은 계정의 다른 단말도 가로챌 수 없다.
+        val active = live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE
+        val holdsLease = active && broadcastService.holdsBroadcastLease(live, token)
+        val isOwner = broadcastService.isShopOwner(live, requesterId)
         return BroadcastLiveDetail(
             id = live.id!!,
             title = live.title,
@@ -179,9 +196,18 @@ class BroadcastController(
             endedAt = live.endedAt,
             currentLiveProductId = live.currentLiveProductId,
             products = productInfos,
-            ingestEndpoint = if (isLive) live.ivsIngestEndpoint else null,
-            streamKey = if (isLive) live.ivsStreamKey else null,
-            playbackUrl = if (isLive) live.ivsPlaybackUrl else null,
+            ingestEndpoint = if (holdsLease) live.ivsIngestEndpoint else null,
+            streamKey = if (holdsLease) live.ivsStreamKey else null,
+            playbackUrl = if (holdsLease) live.ivsPlaybackUrl else null,
+            canBroadcast = holdsLease ||
+                (active && live.startedByUserId == requesterId) || // 시작 계정은 start 재호출로 임대를 갱신할 수 있다
+                (live.status == LiveStatus.SCHEDULED),
+            canControl = holdsLease,
+            canForceEnd = active && isOwner,
         )
+    }
+
+    companion object {
+        const val BROADCAST_TOKEN_HEADER = "X-Broadcast-Token"
     }
 }

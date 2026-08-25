@@ -87,20 +87,23 @@ class BroadcastService(
      * 못하게 하고, 부분 유일 Index(STARTING·LIVE)가 최종 방어선이다.
      * STARTING 상태에서 다시 호출하면 재시도로 보고 같은 자격을 반환한다.
      */
+    data class StartResult(val live: Live, val broadcastToken: String)
+
     @Transactional
-    fun start(userId: Long, liveId: Long): Live {
+    fun start(userId: Long, liveId: Long): StartResult {
         val shopId = broadcasterShopId(userId)
         // Shop 단위 직렬화: AWS Channel 생성 전에 시작 슬롯을 확정한다.
         shopRepository.findByIdForUpdate(shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
-        if (live.status == LiveStatus.STARTING) {
-            // 연결 재시도 — 시작자 본인만 발급된 자격을 다시 사용할 수 있다 (송출 가로채기 방지).
+        if (live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE) {
+            // 임대 갱신(단말 교체·재개) — 시작 계정만 가능하며, 토큰이 회전되어
+            // 이전 단말의 임대는 무효화된다.
             if (live.startedByUserId != userId) {
-                throw ResponseStatusException(HttpStatus.CONFLICT, "다른 단말에서 시작 중인 Live입니다.")
+                throw ResponseStatusException(HttpStatus.CONFLICT, "다른 계정이 시작한 Live입니다.")
             }
-            return live
+            return StartResult(live, rotateToken(live))
         }
         if (live.status != LiveStatus.SCHEDULED) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "예정 상태의 Live만 시작할 수 있습니다. (현재: ${live.status})")
@@ -122,8 +125,9 @@ class BroadcastService(
             live.ivsStreamKey = channel.streamKey
             live.ivsStreamKeyArn = channel.streamKeyArn
             live.ivsPlaybackUrl = channel.playbackUrl
-        } else if (live.ivsStreamKey == null) {
-            // 이전 종료에서 Key를 폐기했으므로 Channel 재사용 시 새 Key를 발급한다.
+        } else if (live.ivsStreamKey == null || live.ivsStreamKeyArn == null) {
+            // 이전 종료에서 Key를 폐기했거나(V15 이전) ARN이 없어 폐기 불가능한 Key는
+            // 신뢰하지 않고 새 Key를 발급한다.
             val key = ivsService.createStreamKey(live.ivsChannelArn!!)
             live.ivsStreamKey = key.value
             live.ivsStreamKeyArn = key.arn
@@ -132,12 +136,36 @@ class BroadcastService(
         live.startedByUserId = userId
         live.currentLiveProductId = products.first().id
         live.updatedAt = OffsetDateTime.now()
+        val token = rotateToken(live)
         return try {
-            liveRepository.saveAndFlush(live)
+            StartResult(liveRepository.saveAndFlush(live), token)
         } catch (e: DataIntegrityViolationException) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "이미 방송 중이거나 시작 중인 Live가 있습니다.")
         }
     }
+
+    /** 임대 토큰 발급·회전 — 평문은 반환하고 해시만 저장한다. */
+    private fun rotateToken(live: Live): String {
+        val token = java.util.UUID.randomUUID().toString()
+        live.broadcastTokenHash = sha256(token)
+        live.updatedAt = OffsetDateTime.now()
+        return token
+    }
+
+    /** 요청 헤더의 임대 토큰이 이 Live의 방송 단말 토큰인지. */
+    fun holdsBroadcastLease(live: Live, token: String?): Boolean =
+        token != null && live.broadcastTokenHash != null && sha256(token) == live.broadcastTokenHash
+
+    private fun requireBroadcastLease(live: Live, token: String?) {
+        if (!holdsBroadcastLease(live, token)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송을 시작한 단말에서만 조작할 수 있습니다.")
+        }
+    }
+
+    private fun sha256(value: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
 
     /**
      * 방송 중 확정: 앱이 SDK 연결(CONNECTED)을 확인할 때마다 호출한다.
@@ -145,13 +173,15 @@ class BroadcastService(
      * 재연결로 새 Session이 생기면 이전 이력을 닫고 새 행을 추가한다.
      */
     @Transactional
-    fun confirm(userId: Long, liveId: Long): Live {
+    fun confirm(userId: Long, liveId: Long, broadcastToken: String?): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
         if (live.status != LiveStatus.STARTING && live.status != LiveStatus.LIVE) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "시작 중이거나 방송 중인 Live만 확정할 수 있습니다. (현재: ${live.status})")
         }
+        // 방송 상태·사용량 이력을 바꾸는 동작이므로 방송 단말(임대 토큰)만 허용한다.
+        requireBroadcastLease(live, broadcastToken)
         val channelArn = live.ivsChannelArn
             ?: throw ResponseStatusException(HttpStatus.CONFLICT, "IVS Channel이 없습니다. 방송을 다시 시작하세요.")
         val streamSessionId = ivsService.currentStreamSessionId(channelArn)
@@ -188,7 +218,7 @@ class BroadcastService(
      * 실제 송출이 계속되는데 시스템만 종료로 표시되는 상태를 막는다. 사용자는 재시도한다.
      */
     @Transactional
-    fun end(userId: Long, liveId: Long): Live {
+    fun end(userId: Long, liveId: Long, broadcastToken: String?): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
@@ -202,12 +232,17 @@ class BroadcastService(
                 HttpStatus.CONFLICT, "방송 중이거나 시작 중인 Live만 종료할 수 있습니다. (현재: ${live.status})",
             )
         }
-        requireStarterOrOwner(live, userId)
-        live.ivsChannelArn?.let { arn -> stopStreamOrThrow(arn, liveId) }
-        // 발급된 Stream Key를 폐기해 자동 재연결·재송출을 영구 차단한다. 재시작 시 새 Key를 발급한다.
+        // 방송 단말(임대 토큰) 또는 Owner(강제 종료)만 종료할 수 있다.
+        if (!holdsBroadcastLease(live, broadcastToken)) {
+            requireOwner(live, userId)
+        }
+        // 폐기 → 중단 순서: StopStream 직후 다른 단말의 자동 재연결이 붙는 경쟁을 막기 위해
+        // Stream Key를 먼저 폐기한 뒤 송출을 중단한다 (AWS 권고).
         live.ivsStreamKeyArn?.let { keyArn -> deleteStreamKeyOrThrow(keyArn, liveId) }
         live.ivsStreamKey = null
         live.ivsStreamKeyArn = null
+        live.broadcastTokenHash = null
+        live.ivsChannelArn?.let { arn -> stopStreamOrThrow(arn, liveId) }
 
         val now = OffsetDateTime.now()
         streamSessionRepository.findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId)?.let { it.endedAt = now }
@@ -224,13 +259,16 @@ class BroadcastService(
         return live
     }
 
-    /** 방송 중 조작(전환·종료)은 시작자 본인 또는 Shop Owner만 할 수 있다. */
-    private fun requireStarterOrOwner(live: Live, userId: Long) {
-        if (live.startedByUserId == userId) return
+    /** 요청자가 이 Live의 Shop Owner인지. */
+    fun isShopOwner(live: Live, userId: Long): Boolean {
         val ownerMembership = membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER)
         val shop = ownerMembership?.let { shopRepository.findByTenantId(it.tenantId) }
-        if (shop?.id != live.shopId) {
-            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송을 시작한 계정 또는 Owner만 조작할 수 있습니다.")
+        return shop?.id == live.shopId
+    }
+
+    private fun requireOwner(live: Live, userId: Long) {
+        if (!isShopOwner(live, userId)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송을 시작한 단말 또는 Owner만 종료할 수 있습니다.")
         }
     }
 
@@ -276,14 +314,15 @@ class BroadcastService(
 
     /** 방송 중 현재 판매 상품 전환. */
     @Transactional
-    fun switchCurrentProduct(userId: Long, liveId: Long, liveProductId: Long): Live {
+    fun switchCurrentProduct(userId: Long, liveId: Long, liveProductId: Long, broadcastToken: String?): Live {
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
         if (live.status != LiveStatus.LIVE) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "방송 중에만 현재 상품을 전환할 수 있습니다.")
         }
-        requireStarterOrOwner(live, userId)
+        // 송출 화면의 오버레이 조작이므로 방송 단말(임대 토큰)만 허용한다.
+        requireBroadcastLease(live, broadcastToken)
         val liveProduct = activeLiveProducts(liveId).firstOrNull { it.id == liveProductId }
             ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "이 Live에 연결된 상품이 아닙니다.")
         live.currentLiveProductId = liveProduct.id

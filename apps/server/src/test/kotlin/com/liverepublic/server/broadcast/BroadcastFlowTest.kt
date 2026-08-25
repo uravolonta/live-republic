@@ -118,6 +118,13 @@ class BroadcastFlowTest {
         return mapper.readTree(result.response.contentAsString).get("id").asLong()
     }
 
+    /** 시작 요청을 보내고 송출 임대 토큰을 돌려받는다. */
+    private fun startLive(session: Cookie, liveId: Long): String {
+        val body = mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isOk).andReturn().response.contentAsString
+        return mapper.readTree(body).get("broadcastToken").asText()
+    }
+
     private fun createLiveWithProducts(session: Cookie, title: String, productIds: List<Long>): Long {
         val result = mockMvc.perform(
             post("/api/lives").cookie(session).contentType(MediaType.APPLICATION_JSON)
@@ -140,21 +147,25 @@ class BroadcastFlowTest {
         val p2 = createProduct(session, "방송 상품 2")
         val liveId = createLiveWithProducts(session, "전체 흐름 방송", listOf(p1, p2))
 
-        // 시작 요청 → STARTING: 송출 자격은 발급되지만 아직 방송 중이 아니다.
+        // 시작 요청 → STARTING: 송출 자격과 임대 토큰이 발급되지만 아직 방송 중이 아니다.
         mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("STARTING"))
             .andExpect(jsonPath("$.ingestEndpoint").value(org.hamcrest.Matchers.startsWith("rtmps://")))
             .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+            .andExpect(jsonPath("$.broadcastToken").isNotEmpty)
+            .andExpect(jsonPath("$.canControl").value(true))
             .andExpect(jsonPath("$.startedAt").value(org.hamcrest.Matchers.nullValue()))
 
-        // 재시작 요청은 재시도로 보고 같은 자격을 반환한다.
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
-            .andExpect(status().isOk)
-            .andExpect(jsonPath("$.status").value("STARTING"))
+        // 재시작(임대 갱신) — 토큰이 회전되어 새 토큰을 받는다.
+        val token = startLive(session, liveId)
 
-        // SDK 연결 확인 → LIVE 확정 + Stream Session 기록.
-        val startBody = mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+        // SDK 연결 확인 → LIVE 확정 + Stream Session 기록. 방송 단말(토큰)만 가능하다.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+            .andExpect(status().isForbidden) // 토큰 없이는 확정 불가
+        val startBody = mockMvc.perform(
+            post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token),
+        )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("LIVE"))
             .andExpect(jsonPath("$.startedAt").isNotEmpty)
@@ -166,9 +177,10 @@ class BroadcastFlowTest {
         // SKU별 재고(Available)가 함께 내려간다.
         assert(detail.get("products").get(0).get("skus").size() == 2)
 
-        // 상품 전환 → 현재 상품 변경
+        // 상품 전환 → 현재 상품 변경 (방송 단말 토큰 필수)
         mockMvc.perform(
             put("/api/broadcast/lives/$liveId/current-product").cookie(session)
+                .header("X-Broadcast-Token", token)
                 .contentType(MediaType.APPLICATION_JSON).content("""{"liveProductId":$secondLp}"""),
         ).andExpect(status().isOk)
             .andExpect(jsonPath("$.currentLiveProductId").value(secondLp))
@@ -199,8 +211,7 @@ class BroadcastFlowTest {
         val p = createProduct(session, "재진입 상품")
         val liveId = createLiveWithProducts(session, "재진입 방송", listOf(p))
 
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
-            .andExpect(status().isOk)
+        val token = startLive(session, liveId)
 
         // 앱이 종료돼도 목록에서 STARTING Live가 보인다 (슬롯 점유 중이므로 필수).
         mockMvc.perform(get("/api/broadcast/lives").cookie(session))
@@ -208,9 +219,14 @@ class BroadcastFlowTest {
             .andExpect(jsonPath("$[0].id").value(liveId))
             .andExpect(jsonPath("$[0].status").value("STARTING"))
 
-        // 재진입: 상세에서 같은 송출 자격을 다시 받는다 (재개 가능).
+        // 재진입: 임대 토큰을 제시한 단말만 자격을 다시 받는다. 토큰 없는 조회(같은 계정의
+        // 다른 단말 포함)에는 자격이 내려가지 않는다.
         mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue()))
+            .andExpect(jsonPath("$.canBroadcast").value(true)) // 시작 계정은 start 재호출로 임대 갱신 가능
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session).header("X-Broadcast-Token", token))
             .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+            .andExpect(jsonPath("$.canControl").value(true))
 
         // 시작 취소 → SCHEDULED 복귀, 서버가 IVS 중단도 시도한다.
         val stopsBefore = stubIvs.stops.get()
@@ -225,18 +241,17 @@ class BroadcastFlowTest {
         val session = ownerSession("bc-confirm-retry@test.local")
         val p = createProduct(session, "지연 상품")
         val liveId = createLiveWithProducts(session, "지연 방송", listOf(p))
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
-            .andExpect(status().isOk)
+        val token = startLive(session, liveId)
 
         stubIvs.streamAvailable = false
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
             .andExpect(status().isConflict)
         // 아직 STARTING이어야 재시도할 수 있다.
         mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
             .andExpect(jsonPath("$.status").value("STARTING"))
 
         stubIvs.streamAvailable = true
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("LIVE"))
     }
@@ -246,8 +261,9 @@ class BroadcastFlowTest {
         val session = ownerSession("bc-stop-fail@test.local")
         val p = createProduct(session, "중단 실패 상품")
         val liveId = createLiveWithProducts(session, "중단 실패 방송", listOf(p))
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+        val token = startLive(session, liveId)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(status().isOk)
 
         // 2회 모두 실패 → 종료 확정 없이 502, 상태는 LIVE 유지 (실송출 방치 방지).
         stubIvs.failStopsRemaining = 2
@@ -267,12 +283,13 @@ class BroadcastFlowTest {
         val session = ownerSession("bc-session-history@test.local")
         val p = createProduct(session, "이력 상품")
         val liveId = createLiveWithProducts(session, "이력 방송", listOf(p))
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+        val token = startLive(session, liveId)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(status().isOk)
 
         // 재연결 후 새 Stream Session — LIVE 상태에서의 재확정이 새 이력을 추가한다.
         stubIvs.streamIdSuffix = "b"
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("LIVE"))
 
@@ -311,11 +328,10 @@ class BroadcastFlowTest {
         mockMvc.perform(post("/api/broadcast/lives/$live1/end").cookie(session))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("SCHEDULED"))
-        mockMvc.perform(post("/api/broadcast/lives/$live2/start").cookie(session))
-            .andExpect(status().isOk)
+        val token2 = startLive(session, live2)
 
         // LIVE 확정 후 종료 → ENDED.
-        mockMvc.perform(post("/api/broadcast/lives/$live2/confirm").cookie(session))
+        mockMvc.perform(post("/api/broadcast/lives/$live2/confirm").cookie(session).header("X-Broadcast-Token", token2))
             .andExpect(status().isOk)
         mockMvc.perform(post("/api/broadcast/lives/$live2/end").cookie(session))
             .andExpect(status().isOk)
@@ -382,11 +398,10 @@ class BroadcastFlowTest {
         ).andExpect(status().isCreated).andReturn().response.contentAsString
         val liveId = mapper.readTree(body).get("id").asLong()
 
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(streamerSession))
-            .andExpect(status().isOk)
-            .andExpect(jsonPath("$.status").value("STARTING"))
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(streamerSession))
-            .andExpect(status().isOk)
+        val gToken = startLive(streamerSession, liveId)
+        mockMvc.perform(
+            post("/api/broadcast/lives/$liveId/confirm").cookie(streamerSession).header("X-Broadcast-Token", gToken),
+        ).andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("LIVE"))
 
         // 시작 요청자가 기록되고 Owner 목록에서도 방송중으로 보인다.
@@ -450,11 +465,12 @@ class BroadcastFlowTest {
         val p = createProduct(session, "키 폐기 상품")
         val liveId = createLiveWithProducts(session, "키 폐기 방송", listOf(p))
 
-        val firstKey = mapper.readTree(
-            mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
-                .andReturn().response.contentAsString,
-        ).get("streamKey").asText()
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+        val startBody = mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andReturn().response.contentAsString
+        val firstKey = mapper.readTree(startBody).get("streamKey").asText()
+        val token = mapper.readTree(startBody).get("broadcastToken").asText()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(status().isOk)
 
         val deletedBefore = stubIvs.keysDeleted.get()
         mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
@@ -469,7 +485,7 @@ class BroadcastFlowTest {
 
         // 같은 Channel을 재사용하는 다른 Live 흐름: 시작 취소(SCHEDULED 복귀) 후 재시작 시 새 Key.
         val live2 = createLiveWithProducts(session, "재발급 방송", listOf(p))
-        mockMvc.perform(post("/api/broadcast/lives/$live2/start").cookie(session)).andExpect(status().isOk)
+        startLive(session, live2)
         mockMvc.perform(post("/api/broadcast/lives/$live2/end").cookie(session))
             .andExpect(jsonPath("$.status").value("SCHEDULED")) // 시작 취소 — Key는 폐기됨
         val rekeyed = mapper.readTree(
@@ -482,7 +498,7 @@ class BroadcastFlowTest {
     }
 
     @Test
-    fun `송출 자격은 방송을 시작한 계정에만 응답된다`() {
+    fun `송출 자격은 임대 토큰을 제시한 방송 단말에만 응답된다`() {
         val session = ownerSession("bc-lease@test.local")
         val p = createProduct(session, "임대 상품")
         val liveId = createLiveWithProducts(session, "임대 방송", listOf(p))
@@ -498,24 +514,41 @@ class BroadcastFlowTest {
                 .content("""{"currentPassword":"temp-pass-123","newPassword":"changed-pass-456"}"""),
         ).andExpect(status().isOk)
 
-        // Owner가 시작 — Streamer의 상세 조회에는 송출 자격이 내려가지 않는다 (가로채기 방지).
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
-        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(streamerSession))
-            .andExpect(status().isOk)
-            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue()))
-        // 시작자 본인에게는 내려간다.
-        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
-            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+        // Owner 단말 A가 시작 — 임대 토큰을 받는다.
+        val token = startLive(session, liveId)
 
-        // STARTING 재시작(자격 재수령)도 시작자만 가능하다.
+        // 같은 계정의 다른 단말(토큰 없음)에도 자격이 내려가지 않는다 — 계정이 아닌 단말 기준.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue()))
+            .andExpect(jsonPath("$.canControl").value(false))
+            .andExpect(jsonPath("$.canBroadcast").value(true))
+        // 임대 단말에는 내려간다.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+            .andExpect(jsonPath("$.canControl").value(true))
+        // 다른 계정(Streamer)에는 상태만 보인다.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(streamerSession))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue()))
+            .andExpect(jsonPath("$.canBroadcast").value(false))
+
+        // 임대 갱신(start 재호출)은 시작 계정만 — 토큰이 회전되어 이전 단말은 무효화된다.
         mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(streamerSession))
             .andExpect(status().isConflict)
+        val rotated = startLive(session, liveId)
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session).header("X-Broadcast-Token", token))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue())) // 이전 토큰 무효
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session).header("X-Broadcast-Token", rotated))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
 
-        // 전환·종료는 시작자 또는 Owner만 — Streamer(비시작자)는 403.
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+        // 확정·전환은 임대 단말만, 종료는 임대 단말 또는 Owner(강제)만.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", rotated))
+            .andExpect(status().isOk)
         mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(streamerSession))
             .andExpect(status().isForbidden)
-        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session)).andExpect(status().isOk)
+        // Owner 계정은 토큰 없이 강제 종료할 수 있다.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
     }
 
     @Test

@@ -8,34 +8,50 @@ import org.junit.Test
 class BroadcastUiTest {
 
     @Test
-    fun `상태별 버튼 라벨과 활성화`() {
-        assertEquals("방송 시작" to true, BroadcastUi.action("SCHEDULED"))
-        assertEquals("시작 취소" to true, BroadcastUi.action("STARTING"))
-        assertEquals("방송 종료" to true, BroadcastUi.action("LIVE"))
-        assertEquals(false, BroadcastUi.action("ENDED").second)
-        assertEquals(false, BroadcastUi.action("CANCELLED").second)
+    fun `상태·capability별 버튼`() {
+        // 예정 상태는 누구든 시작 버튼 (서버가 시작 시 임대를 발급한다)
+        assertEquals("방송 시작" to true, BroadcastUi.action("SCHEDULED", false, true, false, false))
+        // 임대 보유 단말
+        assertEquals("시작 취소" to true, BroadcastUi.action("STARTING", true, true, false, false))
+        assertEquals("방송 종료" to true, BroadcastUi.action("LIVE", true, true, false, false))
+        // 시작 계정의 다른 단말(임대 없음) → 재개 제공
+        assertEquals(
+            "송출 재개 (이 단말로 이어서 방송)" to true,
+            BroadcastUi.action("LIVE", false, true, false, false),
+        )
+        // Owner(비시작) → 강제 종료만
+        assertEquals(
+            "방송 강제 종료 (Owner)" to true,
+            BroadcastUi.action("LIVE", false, false, true, false),
+        )
+        // 권한 없는 Streamer → 조작 불가 안내
+        assertEquals(false, BroadcastUi.action("LIVE", false, false, false, false).second)
+        // 종료 요청 후에는 재시도만 (자동 재송출 금지와 짝)
+        assertEquals("방송 종료 (재시도)" to true, BroadcastUi.action("LIVE", true, true, false, true))
+        assertEquals(false, BroadcastUi.action("ENDED", true, true, true, false).second)
     }
 
     @Test
-    fun `송출 재시작 조건 - 자격이 있고 연결 중이 아닐 때만`() {
-        assertTrue(BroadcastUi.shouldStartStreaming("STARTING", hasCredentials = true, streaming = false))
-        assertTrue(BroadcastUi.shouldStartStreaming("LIVE", hasCredentials = true, streaming = false))
-        // 이미 연결(시도) 중이면 재시작하지 않는다 — 중복 start 방지.
-        assertFalse(BroadcastUi.shouldStartStreaming("LIVE", hasCredentials = true, streaming = true))
-        // 자격이 없으면 시작할 수 없다.
-        assertFalse(BroadcastUi.shouldStartStreaming("STARTING", hasCredentials = false, streaming = false))
-        // 예정·종료 상태에서는 송출하지 않는다.
-        assertFalse(BroadcastUi.shouldStartStreaming("SCHEDULED", hasCredentials = true, streaming = false))
-        assertFalse(BroadcastUi.shouldStartStreaming("ENDED", hasCredentials = true, streaming = false))
+    fun `송출 시작 조건 - 자격 보유 + 세션 미시작 + 종료 의도 없음`() {
+        assertTrue(BroadcastUi.shouldStartStreaming("STARTING", true, sessionStarted = false, endRequested = false))
+        assertTrue(BroadcastUi.shouldStartStreaming("LIVE", true, sessionStarted = false, endRequested = false))
+        // 세션을 이미 시작했으면(자동 재연결 중 포함) 다시 start하지 않는다.
+        assertFalse(BroadcastUi.shouldStartStreaming("LIVE", true, sessionStarted = true, endRequested = false))
+        // 종료를 요청한 뒤에는 자동 재송출하지 않는다.
+        assertFalse(BroadcastUi.shouldStartStreaming("LIVE", true, sessionStarted = false, endRequested = true))
+        assertFalse(BroadcastUi.shouldStartStreaming("STARTING", false, sessionStarted = false, endRequested = false))
+        assertFalse(BroadcastUi.shouldStartStreaming("ENDED", true, sessionStarted = false, endRequested = false))
     }
 
     @Test
-    fun `확정 호출 조건 - 연결됨 + 시작 중 또는 방송 중(재연결 세션 갱신)`() {
-        assertTrue(BroadcastUi.shouldConfirm("STARTING", connected = true))
-        assertTrue(BroadcastUi.shouldConfirm("LIVE", connected = true))
-        assertFalse(BroadcastUi.shouldConfirm("STARTING", connected = false))
-        assertFalse(BroadcastUi.shouldConfirm("SCHEDULED", connected = true))
-        assertFalse(BroadcastUi.shouldConfirm("ENDED", connected = true))
+    fun `확정 호출 조건 - 임대 보유 단말 + 연결됨 + 종료 의도 없음`() {
+        assertTrue(BroadcastUi.shouldConfirm("STARTING", connected = true, canControl = true, endRequested = false))
+        assertTrue(BroadcastUi.shouldConfirm("LIVE", connected = true, canControl = true, endRequested = false))
+        assertFalse(BroadcastUi.shouldConfirm("STARTING", connected = false, canControl = true, endRequested = false))
+        // 임대가 없는 단말은 확정할 수 없다 (사용량 이력 보호).
+        assertFalse(BroadcastUi.shouldConfirm("STARTING", connected = true, canControl = false, endRequested = false))
+        assertFalse(BroadcastUi.shouldConfirm("LIVE", connected = true, canControl = true, endRequested = true))
+        assertFalse(BroadcastUi.shouldConfirm("SCHEDULED", connected = true, canControl = true, endRequested = false))
     }
 
     @Test

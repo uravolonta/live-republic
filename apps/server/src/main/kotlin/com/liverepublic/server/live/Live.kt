@@ -68,6 +68,10 @@ class Live(
     @Column(name = "ivs_stream_key_arn")
     var ivsStreamKeyArn: String? = null,
 
+    /** 송출 임대 토큰의 SHA-256 해시 — 방송 단말 식별 (평문은 start 응답으로만 1회 전달). */
+    @Column(name = "broadcast_token_hash")
+    var broadcastTokenHash: String? = null,
+
     @Column(name = "ivs_playback_url")
     var ivsPlaybackUrl: String? = null,
 

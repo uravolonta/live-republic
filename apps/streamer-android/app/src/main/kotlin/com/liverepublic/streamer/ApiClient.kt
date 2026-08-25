@@ -37,16 +37,33 @@ object ApiClient {
 
     var baseUrl: String = BuildConfig.SERVER_URL
 
-    suspend fun get(path: String): ApiResult = execute(Request.Builder().url(baseUrl + path).get())
+    suspend fun get(path: String, headers: Map<String, String> = emptyMap()): ApiResult =
+        execute(Request.Builder().url(baseUrl + path).get().withHeaders(headers))
 
-    suspend fun post(path: String, json: JSONObject? = null): ApiResult =
-        execute(
-            Request.Builder().url(baseUrl + path)
-                .post((json?.toString() ?: "{}").toRequestBody(jsonType)),
-        )
+    suspend fun post(
+        path: String,
+        json: JSONObject? = null,
+        headers: Map<String, String> = emptyMap(),
+    ): ApiResult = execute(
+        Request.Builder().url(baseUrl + path)
+            .post((json?.toString() ?: "{}").toRequestBody(jsonType))
+            .withHeaders(headers),
+    )
 
-    suspend fun put(path: String, json: JSONObject): ApiResult =
-        execute(Request.Builder().url(baseUrl + path).put(json.toString().toRequestBody(jsonType)))
+    suspend fun put(
+        path: String,
+        json: JSONObject,
+        headers: Map<String, String> = emptyMap(),
+    ): ApiResult = execute(
+        Request.Builder().url(baseUrl + path)
+            .put(json.toString().toRequestBody(jsonType))
+            .withHeaders(headers),
+    )
+
+    private fun Request.Builder.withHeaders(headers: Map<String, String>): Request.Builder {
+        headers.forEach { (name, value) -> header(name, value) }
+        return this
+    }
 
     private suspend fun execute(builder: Request.Builder): ApiResult = withContext(Dispatchers.IO) {
         try {
