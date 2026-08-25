@@ -360,23 +360,22 @@ class BroadcastActivity : AppCompatActivity() {
         val canControl = live.optBoolean("canControl")
         val canBroadcast = live.optBoolean("canBroadcast")
         val canForceEnd = live.optBoolean("canForceEnd")
-        val (label, enabled) = BroadcastUi.action(status, canControl, canBroadcast, canForceEnd, endRequested)
+        val (label, enabled, actionKind) = BroadcastUi.action(status, canControl, canBroadcast, canForceEnd, endRequested)
         actionButton.text = label
         actionButton.isEnabled = enabled
-        when {
-            status == "SCHEDULED" -> actionButton.setOnClickListener { start() }
-            status == "STARTING" || status == "LIVE" -> {
-                if (canControl || endRequested || canForceEnd) {
-                    actionButton.setOnClickListener { end() }
-                } else if (canBroadcast) {
-                    // 시작 계정의 다른(또는 재설치된) 단말 — start 재호출로 임대를 갱신해 재개한다.
-                    actionButton.setOnClickListener { start() }
-                }
-                // 임대를 보유한 단말만 송출·확정을 진행한다.
-                if (canControl) {
-                    startStreamingIfNeeded(live)
-                    if (connectionState == "CONNECTED") confirmLive()
-                }
+        // 클릭 동작은 라벨과 같은 규칙(BroadcastUi.action)에서 결정된다 — 별도 분기로
+        // 배선하면 라벨과 동작이 어긋날 수 있다.
+        when (actionKind) {
+            // SCHEDULED의 시작, 임대 잃은 시작-계정 단말의 재개(start 재호출로 임대 갱신).
+            BroadcastUi.ACTION_START -> actionButton.setOnClickListener { start() }
+            BroadcastUi.ACTION_END -> actionButton.setOnClickListener { end() }
+            else -> actionButton.setOnClickListener(null)
+        }
+        if (status == "STARTING" || status == "LIVE") {
+            // 임대를 보유한 단말만 송출·확정을 진행한다.
+            if (canControl) {
+                startStreamingIfNeeded(live)
+                if (connectionState == "CONNECTED") confirmLive()
             }
         }
         // 임대가 없는 단말에는 상품 전환 버튼을 비활성화한다 (서버도 403으로 차단).

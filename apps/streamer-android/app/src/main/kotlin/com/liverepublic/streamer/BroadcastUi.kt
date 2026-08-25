@@ -18,10 +18,17 @@ object BroadcastUi {
         else -> "$title ($status)"
     }
 
+    const val ACTION_START = "START"
+    const val ACTION_END = "END"
+    const val ACTION_NONE = "NONE"
+
     /**
-     * (버튼 라벨, 활성화 여부). 서버가 내려준 capability로 판단한다:
+     * (버튼 라벨, 활성화 여부, 동작 종류). 서버가 내려준 capability로 판단한다:
      * canControl = 이 단말이 송출 임대를 보유, canBroadcast = 임대를 (재)획득할 수 있음,
      * canForceEnd = Owner의 강제 종료 권한.
+     * 라벨과 클릭 동작을 여기서 함께 결정한다 — Owner 단말이 임대를 잃으면
+     * canBroadcast·canForceEnd가 동시에 참이므로, 별도 분기로 배선하면
+     * "송출 재개" 라벨에 종료 동작이 붙는 어긋남이 생긴다 (실기기에서 적발).
      */
     fun action(
         status: String,
@@ -29,14 +36,14 @@ object BroadcastUi {
         canBroadcast: Boolean,
         canForceEnd: Boolean,
         endRequested: Boolean,
-    ): Pair<String, Boolean> = when {
-        status == "SCHEDULED" -> "방송 시작" to true
-        status != "STARTING" && status != "LIVE" -> "종료된 방송입니다" to false
-        endRequested -> "방송 종료 (재시도)" to true
-        canControl -> (if (status == "STARTING") "시작 취소" else "방송 종료") to true
-        canBroadcast -> "송출 재개 (이 단말로 이어서 방송)" to true
-        canForceEnd -> "방송 강제 종료 (Owner)" to true
-        else -> "시작한 단말에서 조작할 수 있습니다" to false
+    ): Triple<String, Boolean, String> = when {
+        status == "SCHEDULED" -> Triple("방송 시작", true, ACTION_START)
+        status != "STARTING" && status != "LIVE" -> Triple("종료된 방송입니다", false, ACTION_NONE)
+        endRequested -> Triple("방송 종료 (재시도)", true, ACTION_END)
+        canControl -> Triple(if (status == "STARTING") "시작 취소" else "방송 종료", true, ACTION_END)
+        canBroadcast -> Triple("송출 재개 (이 단말로 이어서 방송)", true, ACTION_START)
+        canForceEnd -> Triple("방송 강제 종료 (Owner)", true, ACTION_END)
+        else -> Triple("시작한 단말에서 조작할 수 있습니다", false, ACTION_NONE)
     }
 
     /**

@@ -8,27 +8,36 @@ import org.junit.Test
 class BroadcastUiTest {
 
     @Test
-    fun `상태·capability별 버튼`() {
+    fun `상태·capability별 버튼 - 라벨과 동작이 함께 결정된다`() {
+        val start = BroadcastUi.ACTION_START
+        val end = BroadcastUi.ACTION_END
         // 예정 상태는 누구든 시작 버튼 (서버가 시작 시 임대를 발급한다)
-        assertEquals("방송 시작" to true, BroadcastUi.action("SCHEDULED", false, true, false, false))
+        assertEquals(Triple("방송 시작", true, start), BroadcastUi.action("SCHEDULED", false, true, false, false))
         // 임대 보유 단말
-        assertEquals("시작 취소" to true, BroadcastUi.action("STARTING", true, true, false, false))
-        assertEquals("방송 종료" to true, BroadcastUi.action("LIVE", true, true, false, false))
+        assertEquals(Triple("시작 취소", true, end), BroadcastUi.action("STARTING", true, true, false, false))
+        assertEquals(Triple("방송 종료", true, end), BroadcastUi.action("LIVE", true, true, false, false))
         // 시작 계정의 다른 단말(임대 없음) → 재개 제공
         assertEquals(
-            "송출 재개 (이 단말로 이어서 방송)" to true,
+            Triple("송출 재개 (이 단말로 이어서 방송)", true, start),
             BroadcastUi.action("LIVE", false, true, false, false),
         )
-        // Owner(비시작) → 강제 종료만
+        // 회귀(실기기 적발): Owner 단말이 임대를 잃으면 canBroadcast·canForceEnd가 동시에
+        // 참이다 — 라벨과 동일하게 재개(START)여야 하고 종료가 배선되면 안 된다.
         assertEquals(
-            "방송 강제 종료 (Owner)" to true,
+            Triple("송출 재개 (이 단말로 이어서 방송)", true, start),
+            BroadcastUi.action("LIVE", false, true, true, false),
+        )
+        // Owner(비시작, 재개 불가) → 강제 종료만
+        assertEquals(
+            Triple("방송 강제 종료 (Owner)", true, end),
             BroadcastUi.action("LIVE", false, false, true, false),
         )
         // 권한 없는 Streamer → 조작 불가 안내
         assertEquals(false, BroadcastUi.action("LIVE", false, false, false, false).second)
         // 종료 요청 후에는 재시도만 (자동 재송출 금지와 짝)
-        assertEquals("방송 종료 (재시도)" to true, BroadcastUi.action("LIVE", true, true, false, true))
+        assertEquals(Triple("방송 종료 (재시도)", true, end), BroadcastUi.action("LIVE", true, true, false, true))
         assertEquals(false, BroadcastUi.action("ENDED", true, true, true, false).second)
+        assertEquals(BroadcastUi.ACTION_NONE, BroadcastUi.action("ENDED", true, true, true, false).third)
     }
 
     @Test
