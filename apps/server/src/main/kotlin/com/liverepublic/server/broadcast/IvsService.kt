@@ -13,8 +13,11 @@ data class IvsChannel(
     val channelArn: String,
     val ingestEndpoint: String,
     val streamKey: String,
+    val streamKeyArn: String,
     val playbackUrl: String,
 )
+
+data class IvsStreamKey(val arn: String, val value: String)
 
 /** IVS Channel 관리. 테스트에서는 Stub으로 대체한다. */
 interface IvsService {
@@ -23,6 +26,12 @@ interface IvsService {
 
     /** 현재 송출 중인 Stream Session 식별자. 송출이 없으면 null. */
     fun currentStreamSessionId(channelArn: String): String?
+
+    /** Channel 재사용 시 새 Stream Key 발급 (기존 Key는 폐기됐을 수 있다). */
+    fun createStreamKey(channelArn: String): IvsStreamKey
+
+    /** Stream Key 폐기 — 자동 재연결을 포함해 해당 Key의 송출을 영구 차단한다. */
+    fun deleteStreamKey(streamKeyArn: String)
 }
 
 /**
@@ -46,8 +55,22 @@ class AwsIvsService(private val region: String) : IvsService {
             channelArn = channel.arn(),
             ingestEndpoint = "rtmps://${channel.ingestEndpoint()}:443/app/",
             streamKey = response.streamKey().value(),
+            streamKeyArn = response.streamKey().arn(),
             playbackUrl = channel.playbackUrl(),
         )
+    }
+
+    override fun createStreamKey(channelArn: String): IvsStreamKey {
+        val response = client.createStreamKey { it.channelArn(channelArn) }
+        return IvsStreamKey(arn = response.streamKey().arn(), value = response.streamKey().value())
+    }
+
+    override fun deleteStreamKey(streamKeyArn: String) {
+        try {
+            client.deleteStreamKey { it.arn(streamKeyArn) }
+        } catch (e: software.amazon.awssdk.services.ivs.model.ResourceNotFoundException) {
+            // 이미 폐기된 Key — 목적은 달성됐다.
+        }
     }
 
     override fun stopStream(channelArn: String) {

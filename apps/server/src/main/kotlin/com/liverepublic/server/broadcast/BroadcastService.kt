@@ -96,7 +96,11 @@ class BroadcastService(
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
         if (live.status == LiveStatus.STARTING) {
-            return live // 연결 재시도 — 발급된 자격을 그대로 다시 사용한다.
+            // 연결 재시도 — 시작자 본인만 발급된 자격을 다시 사용할 수 있다 (송출 가로채기 방지).
+            if (live.startedByUserId != userId) {
+                throw ResponseStatusException(HttpStatus.CONFLICT, "다른 단말에서 시작 중인 Live입니다.")
+            }
+            return live
         }
         if (live.status != LiveStatus.SCHEDULED) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "예정 상태의 Live만 시작할 수 있습니다. (현재: ${live.status})")
@@ -116,7 +120,13 @@ class BroadcastService(
             live.ivsChannelArn = channel.channelArn
             live.ivsIngestEndpoint = channel.ingestEndpoint
             live.ivsStreamKey = channel.streamKey
+            live.ivsStreamKeyArn = channel.streamKeyArn
             live.ivsPlaybackUrl = channel.playbackUrl
+        } else if (live.ivsStreamKey == null) {
+            // 이전 종료에서 Key를 폐기했으므로 Channel 재사용 시 새 Key를 발급한다.
+            val key = ivsService.createStreamKey(live.ivsChannelArn!!)
+            live.ivsStreamKey = key.value
+            live.ivsStreamKeyArn = key.arn
         }
         live.status = LiveStatus.STARTING
         live.startedByUserId = userId
@@ -150,7 +160,11 @@ class BroadcastService(
         val now = OffsetDateTime.now()
         val openSession = streamSessionRepository.findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId)
         if (openSession?.ivsStreamId != streamSessionId) {
-            openSession?.endedAt = now
+            // 열린 세션 유일 인덱스 위반을 막기 위해, 이전 세션 마감을 새 행 삽입보다 먼저 flush한다.
+            openSession?.let {
+                it.endedAt = now
+                streamSessionRepository.saveAndFlush(it)
+            }
             streamSessionRepository.save(
                 com.liverepublic.server.live.LiveStreamSession(
                     liveId = liveId, ivsChannelArn = channelArn,
@@ -178,12 +192,22 @@ class BroadcastService(
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
+        // 멱등: 이미 종료(ENDED)됐거나 시작 취소로 SCHEDULED로 돌아간 뒤의 재요청은
+        // 성공으로 응답한다 — 응답 유실 후 재시도가 오류로 보이지 않게 한다.
+        if (live.status == LiveStatus.ENDED || live.status == LiveStatus.SCHEDULED) {
+            return live
+        }
         if (live.status != LiveStatus.STARTING && live.status != LiveStatus.LIVE) {
             throw ResponseStatusException(
                 HttpStatus.CONFLICT, "방송 중이거나 시작 중인 Live만 종료할 수 있습니다. (현재: ${live.status})",
             )
         }
+        requireStarterOrOwner(live, userId)
         live.ivsChannelArn?.let { arn -> stopStreamOrThrow(arn, liveId) }
+        // 발급된 Stream Key를 폐기해 자동 재연결·재송출을 영구 차단한다. 재시작 시 새 Key를 발급한다.
+        live.ivsStreamKeyArn?.let { keyArn -> deleteStreamKeyOrThrow(keyArn, liveId) }
+        live.ivsStreamKey = null
+        live.ivsStreamKeyArn = null
 
         val now = OffsetDateTime.now()
         streamSessionRepository.findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId)?.let { it.endedAt = now }
@@ -198,6 +222,34 @@ class BroadcastService(
         }
         live.updatedAt = now
         return live
+    }
+
+    /** 방송 중 조작(전환·종료)은 시작자 본인 또는 Shop Owner만 할 수 있다. */
+    private fun requireStarterOrOwner(live: Live, userId: Long) {
+        if (live.startedByUserId == userId) return
+        val ownerMembership = membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER)
+        val shop = ownerMembership?.let { shopRepository.findByTenantId(it.tenantId) }
+        if (shop?.id != live.shopId) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송을 시작한 계정 또는 Owner만 조작할 수 있습니다.")
+        }
+    }
+
+    private fun deleteStreamKeyOrThrow(streamKeyArn: String, liveId: Long) {
+        var lastError: Exception? = null
+        repeat(2) { attempt ->
+            try {
+                ivsService.deleteStreamKey(streamKeyArn)
+                return
+            } catch (e: Exception) {
+                lastError = e
+                log.error("IVS Stream Key 폐기 실패 (live={}, 시도 {}/2): {}", liveId, attempt + 1, e.message)
+            }
+        }
+        throw ResponseStatusException(
+            HttpStatus.BAD_GATEWAY,
+            "송출 자격 폐기에 실패했습니다. 잠시 후 종료를 다시 시도하세요.",
+            lastError,
+        )
     }
 
     private fun stopStreamOrThrow(channelArn: String, liveId: Long) {
@@ -231,6 +283,7 @@ class BroadcastService(
         if (live.status != LiveStatus.LIVE) {
             throw ResponseStatusException(HttpStatus.CONFLICT, "방송 중에만 현재 상품을 전환할 수 있습니다.")
         }
+        requireStarterOrOwner(live, userId)
         val liveProduct = activeLiveProducts(liveId).firstOrNull { it.id == liveProductId }
             ?: throw ResponseStatusException(HttpStatus.BAD_REQUEST, "이 Live에 연결된 상품이 아닙니다.")
         live.currentLiveProductId = liveProduct.id

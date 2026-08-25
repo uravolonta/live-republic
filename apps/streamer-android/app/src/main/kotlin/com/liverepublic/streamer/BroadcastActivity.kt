@@ -12,6 +12,7 @@ import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -64,6 +65,32 @@ class BroadcastActivity : AppCompatActivity() {
                 Toast.makeText(this@BroadcastActivity, "송출 오류: ${exception.detail}", Toast.LENGTH_LONG).show()
             }
         }
+
+        /** 자동 재연결의 대기·재시도·실패는 이 콜백으로 전달된다. */
+        override fun onRetryStateChanged(state: BroadcastSession.RetryState) {
+            runOnUiThread {
+                when (state) {
+                    BroadcastSession.RetryState.WAITING_FOR_INTERNET,
+                    BroadcastSession.RetryState.WAITING_FOR_BACKOFF_TIMER,
+                    BroadcastSession.RetryState.RETRYING,
+                    -> {
+                        connectionState = "CONNECTING"
+                        updateStatusText()
+                    }
+                    BroadcastSession.RetryState.FAILURE -> {
+                        streaming = false
+                        connectionState = "ERROR"
+                        updateStatusText()
+                        Toast.makeText(
+                            this@BroadcastActivity,
+                            "자동 재연결에 실패했습니다. 화면을 다시 열어 송출을 재개하거나 방송을 종료하세요.",
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
+                    else -> Unit
+                }
+            }
+        }
     }
 
     private fun updateStatusText() {
@@ -74,6 +101,22 @@ class BroadcastActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         liveId = intent.getLongExtra("liveId", 0)
+
+        // 방송 중 화면이 꺼지지 않게 유지한다 (정책: 방송은 이 화면에서만 송출).
+        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        // 방송·시작 중에는 실수로 뒤로 가기를 눌러 송출이 끊기지 않도록 확인을 받는다.
+        onBackPressedDispatcher.addCallback(this) {
+            val status = detail?.optString("status")
+            if (status == "LIVE" || status == "STARTING") {
+                android.app.AlertDialog.Builder(this@BroadcastActivity)
+                    .setMessage("방송 중입니다. 화면을 나가면 송출이 끊깁니다.\n'방송 종료'로 종료하는 것을 권장합니다.")
+                    .setPositiveButton("그래도 나가기") { _, _ -> finish() }
+                    .setNegativeButton("계속 방송", null)
+                    .show()
+            } else {
+                finish()
+            }
+        }
 
         previewContainer = FrameLayout(this)
         statusText = TextView(this).apply {
@@ -135,9 +178,16 @@ class BroadcastActivity : AppCompatActivity() {
 
     /** 카메라 미리보기를 붙이고 Live 상태를 불러온다. */
     private fun setUp() {
-        // 720p/30fps 세로 송출 (2026-08-24 결정: BASIC + 720p) + 일시적 네트워크 단절 자동 재연결
-        val config = Presets.Configuration.STANDARD_PORTRAIT
-        config.autoReconnect.setEnabled(true)
+        // BASIC Channel 한도(480p 초과 시 최대 3.5Mbps)에 맞춘 커스텀 설정 — 공유 프리셋을
+        // 변경하지 않는 독립 객체다. 720p/30fps (2026-08-24 결정) + 자동 재연결.
+        val config = com.amazonaws.ivs.broadcast.BroadcastConfiguration().apply {
+            video.setSize(720, 1280)
+            video.setTargetFramerate(30)
+            video.setInitialBitrate(1_800_000)
+            video.setMaxBitrate(3_000_000) // BASIC 한도 3.5Mbps 이내 여유
+            video.setMinBitrate(500_000)
+            autoReconnect.setEnabled(true)
+        }
         val broadcastSession = BroadcastSession(
             this, sessionListener,
             config,
@@ -305,28 +355,39 @@ class BroadcastActivity : AppCompatActivity() {
                 actionButton.isEnabled = true
                 Toast.makeText(
                     this@BroadcastActivity,
-                    ApiClient.errorMessage(result, "종료에 실패했습니다."),
+                    ApiClient.errorMessage(result, "종료에 실패했습니다. 잠시 후 다시 시도하세요."),
                     Toast.LENGTH_LONG,
                 ).show()
+                // 응답 유실 등으로 이미 종료됐을 수 있다 — 실제 상태를 다시 조회해 화면을 맞춘다.
+                refresh()
             }
         }
     }
 
+    private var switching = false
+
     private fun switchProduct(liveProductId: Long) {
+        // 연타 시 요청이 뒤섞여 이전 상품이 최종이 되는 것을 막는다 (진행 중에는 무시).
+        if (switching) return
+        switching = true
         lifecycleScope.launch {
-            val result = ApiClient.put(
-                "/api/broadcast/lives/$liveId/current-product",
-                JSONObject().put("liveProductId", liveProductId),
-            )
-            if (result.status == 200) {
-                detail = ApiClient.json(result)
-                render()
-            } else {
-                Toast.makeText(
-                    this@BroadcastActivity,
-                    ApiClient.errorMessage(result, "상품을 전환하지 못했습니다."),
-                    Toast.LENGTH_LONG,
-                ).show()
+            try {
+                val result = ApiClient.put(
+                    "/api/broadcast/lives/$liveId/current-product",
+                    JSONObject().put("liveProductId", liveProductId),
+                )
+                if (result.status == 200) {
+                    detail = ApiClient.json(result)
+                    render()
+                } else {
+                    Toast.makeText(
+                        this@BroadcastActivity,
+                        ApiClient.errorMessage(result, "상품을 전환하지 못했습니다."),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                }
+            } finally {
+                switching = false
             }
         }
     }

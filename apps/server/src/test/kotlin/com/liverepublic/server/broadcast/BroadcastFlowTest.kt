@@ -37,14 +37,27 @@ class StubIvsService : IvsService {
         streamIdSuffix = "a"
     }
 
+    val keysCreated = AtomicInteger()
+    val keysDeleted = AtomicInteger()
+
     override fun createChannel(name: String): IvsChannel {
         val n = created.incrementAndGet()
         return IvsChannel(
             channelArn = "arn:aws:ivs:stub:channel/$name-$n",
             ingestEndpoint = "rtmps://stub.ingest:443/app/",
             streamKey = "sk_stub_$n",
+            streamKeyArn = "arn:aws:ivs:stub:stream-key/$name-$n",
             playbackUrl = "https://stub.playback/$name.m3u8",
         )
+    }
+
+    override fun createStreamKey(channelArn: String): IvsStreamKey {
+        val n = keysCreated.incrementAndGet()
+        return IvsStreamKey(arn = "arn:aws:ivs:stub:stream-key/re-$n", value = "sk_stub_re_$n")
+    }
+
+    override fun deleteStreamKey(streamKeyArn: String) {
+        keysDeleted.incrementAndGet()
     }
 
     override fun stopStream(channelArn: String) {
@@ -429,6 +442,80 @@ class BroadcastFlowTest {
                     .andExpect(status().isOk)
             }
         }
+    }
+
+    @Test
+    fun `종료는 멱등이며 Stream Key가 폐기되고 재시작 시 새 Key가 발급된다`() {
+        val session = ownerSession("bc-key@test.local")
+        val p = createProduct(session, "키 폐기 상품")
+        val liveId = createLiveWithProducts(session, "키 폐기 방송", listOf(p))
+
+        val firstKey = mapper.readTree(
+            mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+                .andReturn().response.contentAsString,
+        ).get("streamKey").asText()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+
+        val deletedBefore = stubIvs.keysDeleted.get()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
+        assert(stubIvs.keysDeleted.get() == deletedBefore + 1) { "종료 시 Stream Key를 폐기해야 한다" }
+
+        // 멱등: 응답 유실 후 재요청도 성공으로 응답한다.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
+
+        // 같은 Channel을 재사용하는 다른 Live 흐름: 시작 취소(SCHEDULED 복귀) 후 재시작 시 새 Key.
+        val live2 = createLiveWithProducts(session, "재발급 방송", listOf(p))
+        mockMvc.perform(post("/api/broadcast/lives/$live2/start").cookie(session)).andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$live2/end").cookie(session))
+            .andExpect(jsonPath("$.status").value("SCHEDULED")) // 시작 취소 — Key는 폐기됨
+        val rekeyed = mapper.readTree(
+            mockMvc.perform(post("/api/broadcast/lives/$live2/start").cookie(session))
+                .andReturn().response.contentAsString,
+        ).get("streamKey").asText()
+        assert(rekeyed.startsWith("sk_stub_re_")) { "재시작 시 새 Key가 발급돼야 한다: $rekeyed" }
+        assert(rekeyed != firstKey)
+        mockMvc.perform(post("/api/broadcast/lives/$live2/end").cookie(session)).andExpect(status().isOk)
+    }
+
+    @Test
+    fun `송출 자격은 방송을 시작한 계정에만 응답된다`() {
+        val session = ownerSession("bc-lease@test.local")
+        val p = createProduct(session, "임대 상품")
+        val liveId = createLiveWithProducts(session, "임대 방송", listOf(p))
+
+        // 같은 Shop의 Streamer 서브계정 준비
+        mockMvc.perform(
+            post("/api/streamers").cookie(session).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"loginId":"lease-streamer","temporaryPassword":"temp-pass-123","name":"임대"}"""),
+        ).andExpect(status().isCreated)
+        val streamerSession = login("lease-streamer", "temp-pass-123")
+        mockMvc.perform(
+            post("/api/auth/password").cookie(streamerSession).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"currentPassword":"temp-pass-123","newPassword":"changed-pass-456"}"""),
+        ).andExpect(status().isOk)
+
+        // Owner가 시작 — Streamer의 상세 조회에는 송출 자격이 내려가지 않는다 (가로채기 방지).
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session)).andExpect(status().isOk)
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(streamerSession))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.nullValue()))
+        // 시작자 본인에게는 내려간다.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session))
+            .andExpect(jsonPath("$.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+
+        // STARTING 재시작(자격 재수령)도 시작자만 가능하다.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(streamerSession))
+            .andExpect(status().isConflict)
+
+        // 전환·종료는 시작자 또는 Owner만 — Streamer(비시작자)는 403.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session)).andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(streamerSession))
+            .andExpect(status().isForbidden)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session)).andExpect(status().isOk)
     }
 
     @Test

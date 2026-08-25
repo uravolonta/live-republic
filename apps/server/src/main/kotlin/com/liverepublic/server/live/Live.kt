@@ -64,6 +64,10 @@ class Live(
     @Column(name = "ivs_stream_key")
     var ivsStreamKey: String? = null,
 
+    /** 종료 시 Key 폐기(DeleteStreamKey)를 위해 ARN을 보존한다. */
+    @Column(name = "ivs_stream_key_arn")
+    var ivsStreamKeyArn: String? = null,
+
     @Column(name = "ivs_playback_url")
     var ivsPlaybackUrl: String? = null,
 

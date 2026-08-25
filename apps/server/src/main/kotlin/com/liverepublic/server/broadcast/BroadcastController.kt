@@ -58,7 +58,7 @@ data class BroadcastLiveDetail(
     val endedAt: OffsetDateTime?,
     val currentLiveProductId: Long?,
     val products: List<BroadcastProductInfo>,
-    /** LIVE 상태에서만 내려간다 — 송출 재개(앱 재시작)에 필요하다. */
+    /** STARTING·LIVE 상태에서 방송을 시작한 계정에만 내려간다 (송출 재개용, 가로채기 방지). */
     val ingestEndpoint: String?,
     val streamKey: String?,
     val playbackUrl: String?,
@@ -113,42 +113,42 @@ class BroadcastController(
         @Valid @RequestBody request: CreateGuerrillaLiveRequest,
     ): BroadcastLiveDetail {
         val live = broadcastService.createGuerrillaLive(user.id, request.title.trim(), request.productIds)
-        return toDetail(live)
+        return toDetail(live, user.id)
     }
 
     @GetMapping("/lives/{liveId}")
     fun detail(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.getLive(user.id, liveId))
+    ): BroadcastLiveDetail = toDetail(broadcastService.getLive(user.id, liveId), user.id)
 
     @PostMapping("/lives/{liveId}/start")
     fun start(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.start(user.id, liveId))
+    ): BroadcastLiveDetail = toDetail(broadcastService.start(user.id, liveId), user.id)
 
     /** SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 실제 Stream Session을 기록한다. */
     @PostMapping("/lives/{liveId}/confirm")
     fun confirm(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId))
+    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId), user.id)
 
     @PostMapping("/lives/{liveId}/end")
     fun end(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.end(user.id, liveId))
+    ): BroadcastLiveDetail = toDetail(broadcastService.end(user.id, liveId), user.id)
 
     @PutMapping("/lives/{liveId}/current-product")
     fun switchProduct(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
         @Valid @RequestBody request: SwitchProductRequest,
-    ): BroadcastLiveDetail = toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId))
+    ): BroadcastLiveDetail = toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId), user.id)
 
-    private fun toDetail(live: Live): BroadcastLiveDetail {
+    private fun toDetail(live: Live, requesterId: Long): BroadcastLiveDetail {
         val liveProducts = broadcastService.activeLiveProducts(live.id!!)
         val products = productRepository.findAllById(liveProducts.map { it.productId }).associateBy { it.id }
         val skusByProduct = productService.listSkusByProducts(liveProducts.map { it.productId })
@@ -166,8 +166,10 @@ class BroadcastController(
                 )
             }
         }
-        // 송출 자격은 시작 중(STARTING)·방송 중(LIVE)에만 내려간다.
-        val isLive = live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE
+        // 송출 자격은 시작 중(STARTING)·방송 중(LIVE)에, 그리고 방송을 시작한 계정에만
+        // 내려간다 — 같은 Shop의 다른 단말이 같은 Key로 송출을 가로채는 것을 막는다.
+        val isLive = (live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE) &&
+            live.startedByUserId == requesterId
         return BroadcastLiveDetail(
             id = live.id!!,
             title = live.title,
