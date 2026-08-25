@@ -57,7 +57,17 @@ class LiveListActivity : AppCompatActivity() {
                     finish()
                 }
                 403 -> {
-                    startActivity(Intent(this@LiveListActivity, ChangePasswordActivity::class.java))
+                    // 임시 비밀번호 강제 변경만 변경 화면으로 보낸다 — 다른 사유의 403이
+                    // 변경 화면 루프에 갇히지 않게 서버 전용 헤더로 구분한다.
+                    if (result.headers["x-password-change-required"] == "true") {
+                        startActivity(Intent(this@LiveListActivity, ChangePasswordActivity::class.java))
+                    } else {
+                        Toast.makeText(
+                            this@LiveListActivity,
+                            ApiClient.errorMessage(result, "접근이 거부되었습니다."),
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    }
                 }
                 else -> Toast.makeText(
                     this@LiveListActivity,
@@ -71,6 +81,10 @@ class LiveListActivity : AppCompatActivity() {
     private fun render(result: ApiResult) {
         listContainer.removeAllViews()
         val lives = ApiClient.jsonArray(result)
+        if (lives == null) {
+            Toast.makeText(this, "Live 목록을 불러오지 못했습니다.", Toast.LENGTH_LONG).show()
+            return
+        }
         if (lives.length() == 0) {
             listContainer.addView(TextView(this).apply {
                 text = "예정된 Live가 없습니다. 게릴라 Live로 바로 시작할 수 있습니다."
@@ -86,7 +100,7 @@ class LiveListActivity : AppCompatActivity() {
                 append(live.getString("title"))
                 if (status == "LIVE") append("  ● 방송중")
                 if (status == "STARTING") append("  ● 시작 중 — 재진입해 재개·취소")
-                append("\n상품 ${live.getInt("productCount")}개 · ${live.getString("scheduledStartAt").take(16)}")
+                append("\n상품 ${live.getInt("productCount")}개 · ${Formats.localDateTime(live.getString("scheduledStartAt"))}")
             }
             listContainer.addView(Button(this).apply {
                 text = label

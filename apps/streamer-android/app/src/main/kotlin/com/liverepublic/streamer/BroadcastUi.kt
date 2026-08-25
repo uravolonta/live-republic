@@ -39,16 +39,40 @@ object BroadcastUi {
         else -> "시작한 단말에서 조작할 수 있습니다" to false
     }
 
-    /** 송출을 (재)시작해야 하는가 — 임대 자격이 있고, 세션을 아직 시작하지 않았고, 종료 의도가 없을 때. */
+    /**
+     * 송출을 (재)시작해야 하는가 — 임대 자격이 있고, 세션을 아직 시작하지 않았고,
+     * 종료 의도가 없고, 송출이 실패로 끝난 상태(failed: 재연결 포기·치명적 오류)가 아닐 때.
+     * 실패 후에는 사용자의 명시적 재개(start 재호출)만 허용한다 — 폴링 갱신이 자동
+     * 재송출을 반복하지 않게 한다.
+     */
     fun shouldStartStreaming(
         status: String,
         hasCredentials: Boolean,
         sessionStarted: Boolean,
         endRequested: Boolean,
+        failed: Boolean = false,
     ): Boolean =
-        (status == "STARTING" || status == "LIVE") && hasCredentials && !sessionStarted && !endRequested
+        (status == "STARTING" || status == "LIVE") && hasCredentials &&
+            !sessionStarted && !endRequested && !failed
 
     /** 서버 확정을 호출해야 하는가 — 임대 보유 단말이 SDK 연결됐고 종료 의도가 없을 때. */
     fun shouldConfirm(status: String, connected: Boolean, canControl: Boolean, endRequested: Boolean): Boolean =
         connected && canControl && !endRequested && (status == "STARTING" || status == "LIVE")
+
+    /**
+     * confirm 응답별 재시도 여부 — SDK 연결이 유지될 때 IVS 감지 지연(409)·
+     * 통신 단절(0)·서버 오류(5xx)만 재시도한다. 그 외(403 임대 상실 등)는 중단.
+     */
+    fun confirmShouldRetry(httpStatus: Int, connected: Boolean): Boolean =
+        connected && (httpStatus == 409 || httpStatus == 0 || httpStatus >= 500)
+
+    /** confirm 재시도 백오프 — 2배씩 늘리되 10초를 넘지 않는다. */
+    fun nextConfirmDelay(currentMs: Long): Long = (currentMs * 2).coerceAtMost(10_000L)
+
+    /**
+     * 전환 완료 후 이어서 전환할 상품 — 진행 중 사용자가 마지막으로 고른 상품(pendingId)이
+     * 다른 상품이거나, 같은 상품이라도 직전 시도가 실패했으면 재시도한다.
+     */
+    fun nextSwitch(pendingId: Long?, attemptedId: Long, succeeded: Boolean): Long? =
+        pendingId?.takeIf { it != attemptedId || !succeeded }
 }

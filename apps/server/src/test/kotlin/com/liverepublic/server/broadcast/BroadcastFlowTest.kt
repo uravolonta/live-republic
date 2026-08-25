@@ -552,6 +552,42 @@ class BroadcastFlowTest {
     }
 
     @Test
+    fun `단말 교체 재-start는 Stream Key를 회전하고 기존 송출을 중단한다`() {
+        val session = ownerSession("bc-takeover@test.local")
+        val p = createProduct(session, "교체 상품")
+        val liveId = createLiveWithProducts(session, "교체 방송", listOf(p))
+
+        // 단말 A가 시작해 송출 중.
+        val startBody = mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andReturn().response.contentAsString
+        val firstKey = mapper.readTree(startBody).get("streamKey").asText()
+        val tokenA = mapper.readTree(startBody).get("broadcastToken").asText()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", tokenA))
+            .andExpect(status().isOk)
+
+        // 단말 B가 재-start(교체) — A의 Key가 폐기되고 새 Key가 발급되며 현재 송출이 중단된다.
+        // (IVS는 Channel당 1개 스트림만 허용하므로 A를 끊지 않으면 B는 송출할 수 없다.)
+        val deletedBefore = stubIvs.keysDeleted.get()
+        val stopsBefore = stubIvs.stops.get()
+        val takeoverBody = mockMvc.perform(post("/api/broadcast/lives/$liveId/start").cookie(session))
+            .andExpect(status().isOk).andReturn().response.contentAsString
+        val secondKey = mapper.readTree(takeoverBody).get("streamKey").asText()
+        val tokenB = mapper.readTree(takeoverBody).get("broadcastToken").asText()
+        assert(stubIvs.keysDeleted.get() == deletedBefore + 1) { "교체 시 이전 Key를 폐기해야 한다" }
+        assert(stubIvs.stops.get() == stopsBefore + 1) { "교체 시 기존 송출을 중단해야 한다" }
+        assert(secondKey != firstKey && secondKey.startsWith("sk_stub_re_")) { "새 Key가 발급돼야 한다: $secondKey" }
+
+        // A의 토큰·Key는 더 이상 유효하지 않고, B만 조작할 수 있다.
+        mockMvc.perform(get("/api/broadcast/lives/$liveId").cookie(session).header("X-Broadcast-Token", tokenA))
+            .andExpect(jsonPath("$.canControl").value(false))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(session).header("X-Broadcast-Token", tokenB))
+            .andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(session).header("X-Broadcast-Token", tokenB))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
+    }
+
+    @Test
     fun `다른 Shop 사용자는 방송을 시작할 수 없다`() {
         val sessionA = ownerSession("bc-a@test.local")
         val p = createProduct(sessionA, "A 상품")

@@ -16,10 +16,14 @@ import androidx.activity.addCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.lifecycleScope
 import com.amazonaws.ivs.broadcast.BroadcastException
 import com.amazonaws.ivs.broadcast.BroadcastSession
 import com.amazonaws.ivs.broadcast.Presets
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
@@ -35,11 +39,13 @@ class BroadcastActivity : AppCompatActivity() {
     /** session.start()를 호출했고 stop/release하지 않은 상태 — 자동 재연결 중에도 유지된다. */
     private var sessionStarted = false
     private var connectionState: String? = null
-    private var confirmJob: kotlinx.coroutines.Job? = null
+    private var confirmJob: Job? = null
+    private var pollJob: Job? = null
     /** 사용자가 종료를 요청함 — 이후에는 어떤 화면 갱신도 자동 재송출하지 않는다. */
     private var endRequested = false
     private var broadcastToken: String? = null
     private var pendingSwitchId: Long? = null
+    private var switching = false
 
     private lateinit var previewContainer: FrameLayout
     private lateinit var statusText: TextView
@@ -66,7 +72,21 @@ class BroadcastActivity : AppCompatActivity() {
 
         override fun onError(exception: BroadcastException) {
             runOnUiThread {
-                Toast.makeText(this@BroadcastActivity, "송출 오류: ${exception.detail}", Toast.LENGTH_LONG).show()
+                if (exception.isFatal) {
+                    // 잘못된 자격 등 회복 불가 오류는 RetryState.FAILURE 없이 세션이 죽을 수
+                    // 있다 — FAILURE와 동일하게 처리해 수동 재개만 허용한다.
+                    sessionStarted = false
+                    connectionState = "ERROR"
+                    updateStatusText()
+                    Toast.makeText(
+                        this@BroadcastActivity,
+                        "송출이 중단되었습니다: ${exception.detail} — '송출 재개'로 다시 시작하거나 방송을 종료하세요.",
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    refresh()
+                } else {
+                    Toast.makeText(this@BroadcastActivity, "송출 오류: ${exception.detail}", Toast.LENGTH_LONG).show()
+                }
             }
         }
 
@@ -99,7 +119,9 @@ class BroadcastActivity : AppCompatActivity() {
 
     private fun updateStatusText() {
         val live = detail ?: return
-        statusText.text = BroadcastUi.statusLabel(live.getString("status"), live.getString("title"), connectionState)
+        statusText.text = BroadcastUi.statusLabel(
+            live.optString("status"), live.optString("title"), connectionState,
+        )
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -130,6 +152,14 @@ class BroadcastActivity : AppCompatActivity() {
             setBackgroundColor(0x88000000.toInt())
             setPadding(24, 12, 24, 12)
         }
+        // 상단 상태바·카메라 컷아웃(edge-to-edge)에 가려지지 않게 인셋만큼 띄운다.
+        ViewCompat.setOnApplyWindowInsetsListener(statusText) { view, insets ->
+            val bars = insets.getInsets(
+                WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout(),
+            )
+            view.setPadding(24, bars.top + 12, 24, 12)
+            insets
+        }
         productBar = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         skuText = TextView(this).apply {
             setTextColor(Color.WHITE)
@@ -146,8 +176,8 @@ class BroadcastActivity : AppCompatActivity() {
             addView(actionButton)
         }
         // 하단 시스템 내비게이션 바에 버튼이 가려지지 않게 인셋만큼 띄운다.
-        androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(overlay) { view, insets ->
-            val bars = insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        ViewCompat.setOnApplyWindowInsetsListener(overlay) { view, insets ->
+            val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars())
             view.setPadding(0, 0, 0, bars.bottom)
             insets
         }
@@ -212,53 +242,115 @@ class BroadcastActivity : AppCompatActivity() {
             }
         }
         refresh()
+        startPolling()
     }
 
     private fun refresh() {
         lifecycleScope.launch {
             val result = ApiClient.get("/api/broadcast/lives/$liveId", leaseHeaders())
-            if (result.status != 200) {
-                Toast.makeText(
-                    this@BroadcastActivity,
-                    ApiClient.errorMessage(result, "Live를 불러오지 못했습니다."),
-                    Toast.LENGTH_LONG,
-                ).show()
-                finish()
-                return@launch
+            val live = if (result.status == 200) ApiClient.json(result) else null
+            when {
+                live != null -> {
+                    detail = live
+                    applyServerState()
+                    render()
+                }
+                result.status == 401 || result.status == 403 || result.status == 404 -> {
+                    Toast.makeText(
+                        this@BroadcastActivity,
+                        ApiClient.errorMessage(result, "Live를 불러오지 못했습니다."),
+                        Toast.LENGTH_LONG,
+                    ).show()
+                    finish()
+                }
+                else -> {
+                    // 일시적 실패(오프라인·서버 오류·손상 응답) — 화면을 닫으면 종료 재시도
+                    // 버튼까지 잃는다. 재시도 버튼을 남긴다.
+                    statusText.text = "Live 정보를 불러오지 못했습니다 — 연결을 확인하세요"
+                    actionButton.text = "다시 불러오기"
+                    actionButton.isEnabled = true
+                    actionButton.setOnClickListener { refresh() }
+                }
             }
-            detail = ApiClient.json(result)
-            render()
+        }
+    }
+
+    /**
+     * 방송 중 주기 폴링 — 재고 변화를 실시간으로 보여주고(PRD §7),
+     * 임대 상실(단말 교체)·Owner 강제 종료 같은 서버 측 변화를 단말이 감지한다.
+     */
+    private fun startPolling() {
+        if (pollJob?.isActive == true) return
+        pollJob = lifecycleScope.launch {
+            while (true) {
+                delay(POLL_INTERVAL_MS)
+                if (isFinishing) return@launch
+                val status = detail?.optString("status")
+                if (status == "ENDED" || status == "CANCELLED") return@launch
+                val result = ApiClient.get("/api/broadcast/lives/$liveId", leaseHeaders())
+                if (result.status == 200) {
+                    ApiClient.json(result)?.let {
+                        detail = it
+                        applyServerState()
+                        render()
+                    }
+                }
+                // 폴링 실패는 조용히 넘긴다 — 다음 주기에 다시 시도한다.
+            }
+        }
+    }
+
+    /** 서버 상태와 단말 송출을 동기화 — 임대 상실·종료를 감지하면 송출을 멈춘다. */
+    private fun applyServerState() {
+        val live = detail ?: return
+        val status = live.optString("status")
+        if (status == "ENDED" || status == "CANCELLED") {
+            // 끝난 Live의 임대 토큰은 더 이상 쓸 수 없다 — 프리퍼런스 누적을 막는다.
+            BroadcastLease.clear(this, liveId)
+            broadcastToken = null
+        }
+        val active = status == "STARTING" || status == "LIVE"
+        if (sessionStarted && !endRequested && (!active || !live.optBoolean("canControl"))) {
+            confirmJob?.cancel()
+            session?.stop()
+            sessionStarted = false
+            Toast.makeText(
+                this,
+                if (active) "다른 단말이 방송을 이어받아 이 단말의 송출을 중단합니다."
+                else "방송이 종료되어 송출을 중단합니다.",
+                Toast.LENGTH_LONG,
+            ).show()
         }
     }
 
     private fun render() {
         val live = detail ?: return
-        val status = live.getString("status")
+        val status = live.optString("status")
         updateStatusText()
 
         // 상품 전환 Layer
         productBar.removeAllViews()
-        val products = live.getJSONArray("products")
-        val currentId = if (live.isNull("currentLiveProductId")) null else live.getLong("currentLiveProductId")
+        val products = live.optJSONArray("products") ?: org.json.JSONArray()
+        val currentId = if (live.isNull("currentLiveProductId")) null else live.optLong("currentLiveProductId")
         var currentSkuSummary = "현재 판매 상품이 없습니다"
         for (i in 0 until products.length()) {
-            val product = products.getJSONObject(i)
-            val liveProductId = product.getLong("liveProductId")
+            val product = products.optJSONObject(i) ?: continue
+            val liveProductId = product.optLong("liveProductId")
             val isCurrent = liveProductId == currentId
             if (isCurrent) {
-                val skus = product.getJSONArray("skus")
+                val skus = product.optJSONArray("skus") ?: org.json.JSONArray()
                 currentSkuSummary = buildString {
                     append("재고: ")
                     for (s in 0 until skus.length()) {
-                        val sku = skus.getJSONObject(s)
+                        val sku = skus.optJSONObject(s) ?: continue
                         if (s > 0) append(" · ")
-                        append("${sku.getString("optionLabel")} ${sku.getInt("available")}")
+                        append("${sku.optString("optionLabel")} ${sku.optInt("available")}")
                     }
                 }
             }
             productBar.addView(Button(this).apply {
                 isAllCaps = false
-                text = (if (isCurrent) "● " else "") + product.getString("name")
+                text = (if (isCurrent) "● " else "") + product.optString("name")
                 setOnClickListener { switchProduct(liveProductId) }
             })
         }
@@ -300,13 +392,16 @@ class BroadcastActivity : AppCompatActivity() {
         actionButton.isEnabled = false
         lifecycleScope.launch {
             val result = ApiClient.post("/api/broadcast/lives/$liveId/start")
-            if (result.status == 200) {
-                detail = ApiClient.json(result)
+            val live = if (result.status == 200) ApiClient.json(result) else null
+            if (live != null) {
+                detail = live
                 // 송출 임대 토큰 — 이 단말만 Stream Key·조작 권한을 가진다.
-                detail?.optString("broadcastToken", "")?.takeIf { it.isNotEmpty() }?.let { token ->
+                live.optString("broadcastToken", "").takeIf { it.isNotEmpty() }?.let { token ->
                     broadcastToken = token
                     BroadcastLease.save(this@BroadcastActivity, liveId, token)
                 }
+                // 명시적 재개이므로 이전 실패 상태를 지워 송출 시작을 허용한다.
+                if (connectionState == "ERROR") connectionState = null
                 render()
             } else {
                 actionButton.isEnabled = true
@@ -322,9 +417,11 @@ class BroadcastActivity : AppCompatActivity() {
     private fun startStreamingIfNeeded(live: JSONObject) {
         val ingest = live.optString("ingestEndpoint", "")
         val streamKey = live.optString("streamKey", "")
-        // 화면 갱신 때마다 불리므로 매퍼 규칙으로 재시작 여부를 판단한다 (중복 start 방지).
+        // 화면 갱신·폴링 때마다 불리므로 매퍼 규칙으로 재시작 여부를 판단한다
+        // (중복 start 방지 + 실패 후 자동 재송출 방지).
         if (!BroadcastUi.shouldStartStreaming(
-                live.getString("status"), ingest.isNotEmpty() && streamKey.isNotEmpty(), sessionStarted, endRequested,
+                live.optString("status"), ingest.isNotEmpty() && streamKey.isNotEmpty(),
+                sessionStarted, endRequested, failed = connectionState == "ERROR",
             )
         ) {
             return
@@ -353,15 +450,15 @@ class BroadcastActivity : AppCompatActivity() {
             while (System.currentTimeMillis() < deadline) {
                 val result = ApiClient.post("/api/broadcast/lives/$liveId/confirm", headers = leaseHeaders())
                 if (result.status == 200) {
-                    detail = ApiClient.json(result)
-                    render()
+                    ApiClient.json(result)?.let {
+                        detail = it
+                        render()
+                    }
                     return@launch
                 }
-                // SDK 연결이 끊겼거나 화면 상태가 바뀌면 중단한다.
-                if (connectionState != "CONNECTED") return@launch
-                if (result.status != 409 && result.status != 0 && result.status < 500) return@launch
-                kotlinx.coroutines.delay(delayMs)
-                delayMs = (delayMs * 2).coerceAtMost(10_000L)
+                if (!BroadcastUi.confirmShouldRetry(result.status, connectionState == "CONNECTED")) return@launch
+                delay(delayMs)
+                delayMs = BroadcastUi.nextConfirmDelay(delayMs)
             }
             if (detail?.optString("status") == "STARTING") {
                 Toast.makeText(
@@ -398,8 +495,6 @@ class BroadcastActivity : AppCompatActivity() {
         }
     }
 
-    private var switching = false
-
     private fun switchProduct(liveProductId: Long) {
         // 진행 중이면 마지막 선택을 보존했다가 완료 후 이어서 전환한다 (순서 역전 방지 + 의도 보존).
         if (switching) {
@@ -408,15 +503,18 @@ class BroadcastActivity : AppCompatActivity() {
         }
         switching = true
         lifecycleScope.launch {
+            var succeeded = false
             try {
                 val result = ApiClient.put(
                     "/api/broadcast/lives/$liveId/current-product",
                     JSONObject().put("liveProductId", liveProductId),
                     headers = leaseHeaders(),
                 )
-                if (result.status == 200) {
-                    detail = ApiClient.json(result)
+                val live = if (result.status == 200) ApiClient.json(result) else null
+                if (live != null) {
+                    detail = live
                     render()
+                    succeeded = true
                 } else {
                     Toast.makeText(
                         this@BroadcastActivity,
@@ -426,11 +524,10 @@ class BroadcastActivity : AppCompatActivity() {
                 }
             } finally {
                 switching = false
-                // 진행 중에 사용자가 마지막으로 선택한 상품이 있으면 이어서 전환한다.
-                pendingSwitchId?.let { next ->
-                    pendingSwitchId = null
-                    if (next != liveProductId) switchProduct(next)
-                }
+                // 진행 중 사용자가 마지막으로 고른 상품을 이어서 전환한다 (실패 시 같은 상품도 재시도).
+                val next = BroadcastUi.nextSwitch(pendingSwitchId, liveProductId, succeeded)
+                pendingSwitchId = null
+                if (next != null) switchProduct(next)
             }
         }
     }
@@ -438,6 +535,7 @@ class BroadcastActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         confirmJob?.cancel()
+        pollJob?.cancel()
         session?.release()
         session = null
     }
@@ -445,5 +543,6 @@ class BroadcastActivity : AppCompatActivity() {
     companion object {
         private val PERMISSIONS = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         private const val CONFIRM_TIMEOUT_MS = 60_000L
+        private const val POLL_INTERVAL_MS = 10_000L
     }
 }

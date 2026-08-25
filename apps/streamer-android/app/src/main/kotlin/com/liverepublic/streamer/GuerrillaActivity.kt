@@ -39,12 +39,15 @@ class GuerrillaActivity : AppCompatActivity() {
                     JSONObject().put("title", title).put("productIds", JSONArray(selected)),
                 )
                 createButton.isEnabled = true
-                if (result.status == 201) {
-                    val live = ApiClient.json(result)
+                val live = if (result.status == 201) ApiClient.json(result) else null
+                if (live != null) {
                     startActivity(
                         Intent(this@GuerrillaActivity, BroadcastActivity::class.java)
                             .putExtra("liveId", live.getLong("id")),
                     )
+                    finish()
+                } else if (result.status == 401) {
+                    startActivity(Intent(this@GuerrillaActivity, LoginActivity::class.java))
                     finish()
                 } else {
                     toast(ApiClient.errorMessage(result, "생성에 실패했습니다."))
@@ -74,11 +77,17 @@ class GuerrillaActivity : AppCompatActivity() {
 
         lifecycleScope.launch {
             val result = ApiClient.get("/api/broadcast/products")
-            if (result.status != 200) {
+            if (result.status == 401) {
+                // 세션 만료 — 로그인 화면으로 돌려보낸다.
+                startActivity(Intent(this@GuerrillaActivity, LoginActivity::class.java))
+                finish()
+                return@launch
+            }
+            val products = if (result.status == 200) ApiClient.jsonArray(result) else null
+            if (products == null) {
                 toast(ApiClient.errorMessage(result, "상품을 불러오지 못했습니다."))
                 return@launch
             }
-            val products = ApiClient.jsonArray(result)
             for (i in 0 until products.length()) {
                 val product = products.getJSONObject(i)
                 val check = CheckBox(this@GuerrillaActivity).apply {

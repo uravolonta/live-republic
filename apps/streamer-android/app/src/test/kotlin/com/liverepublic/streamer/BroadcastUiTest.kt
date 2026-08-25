@@ -41,6 +41,34 @@ class BroadcastUiTest {
         assertFalse(BroadcastUi.shouldStartStreaming("LIVE", true, sessionStarted = false, endRequested = true))
         assertFalse(BroadcastUi.shouldStartStreaming("STARTING", false, sessionStarted = false, endRequested = false))
         assertFalse(BroadcastUi.shouldStartStreaming("ENDED", true, sessionStarted = false, endRequested = false))
+        // 재연결 포기·치명적 오류 후에는 폴링 갱신이 자동 재송출하지 않는다 — 수동 재개만.
+        assertFalse(BroadcastUi.shouldStartStreaming("LIVE", true, sessionStarted = false, endRequested = false, failed = true))
+    }
+
+    @Test
+    fun `확정 재시도 조건 - 연결 유지 + 감지 지연·통신 단절·서버 오류만`() {
+        assertTrue(BroadcastUi.confirmShouldRetry(409, connected = true)) // IVS 감지 지연
+        assertTrue(BroadcastUi.confirmShouldRetry(0, connected = true)) // 통신 단절
+        assertTrue(BroadcastUi.confirmShouldRetry(500, connected = true))
+        assertFalse(BroadcastUi.confirmShouldRetry(403, connected = true)) // 임대 상실 — 재시도 무의미
+        assertFalse(BroadcastUi.confirmShouldRetry(404, connected = true))
+        assertFalse(BroadcastUi.confirmShouldRetry(409, connected = false)) // 연결이 끊기면 중단
+    }
+
+    @Test
+    fun `확정 백오프 - 2배 증가, 10초 상한`() {
+        assertEquals(4_000L, BroadcastUi.nextConfirmDelay(2_000L))
+        assertEquals(8_000L, BroadcastUi.nextConfirmDelay(4_000L))
+        assertEquals(10_000L, BroadcastUi.nextConfirmDelay(8_000L))
+        assertEquals(10_000L, BroadcastUi.nextConfirmDelay(10_000L))
+    }
+
+    @Test
+    fun `전환 큐잉 - 마지막 선택 보존, 실패 시 같은 상품도 재시도`() {
+        assertEquals(null, BroadcastUi.nextSwitch(null, 1L, succeeded = true))
+        assertEquals(2L, BroadcastUi.nextSwitch(2L, 1L, succeeded = true)) // 다른 상품으로 이어서 전환
+        assertEquals(null, BroadcastUi.nextSwitch(1L, 1L, succeeded = true)) // 이미 반영됨 — 생략
+        assertEquals(1L, BroadcastUi.nextSwitch(1L, 1L, succeeded = false)) // 직전 실패 — 같은 상품 재시도
     }
 
     @Test

@@ -43,7 +43,7 @@ class LoginActivity : AppCompatActivity() {
                 loginButton.isEnabled = true
                 when {
                     result.status == 200 -> {
-                        val me = ApiClient.json(result)
+                        val me = ApiClient.json(result) ?: JSONObject()
                         if (me.optBoolean("mustChangePassword")) {
                             startActivity(Intent(this@LoginActivity, ChangePasswordActivity::class.java))
                         } else {

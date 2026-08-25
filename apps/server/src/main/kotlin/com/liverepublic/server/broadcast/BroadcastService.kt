@@ -103,6 +103,18 @@ class BroadcastService(
             if (live.startedByUserId != userId) {
                 throw ResponseStatusException(HttpStatus.CONFLICT, "다른 계정이 시작한 Live입니다.")
             }
+            // IVS는 Channel당 동시 1개 스트림만 허용하므로, 이전 단말이 살아 있으면 토큰
+            // 회전만으로는 새 단말이 송출을 시작할 수 없다. Stream Key를 회전(폐기→재발급)해
+            // 이전 단말의 재연결을 막고 현재 송출을 중단해 자리를 비운다.
+            live.ivsChannelArn?.let { channelArn ->
+                live.ivsStreamKeyArn?.let { keyArn -> deleteStreamKeyOrThrow(keyArn, liveId) }
+                live.ivsStreamKey = null
+                live.ivsStreamKeyArn = null
+                val key = ivsService.createStreamKey(channelArn)
+                live.ivsStreamKey = key.value
+                live.ivsStreamKeyArn = key.arn
+                stopStreamOrThrow(channelArn, liveId)
+            }
             return StartResult(live, rotateToken(live))
         }
         if (live.status != LiveStatus.SCHEDULED) {
