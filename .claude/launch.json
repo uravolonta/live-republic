@@ -12,6 +12,19 @@
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev", "--prefix", "apps/customer-web"],
       "port": 3001
+    },
+    {
+      "name": "customer-web-live",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "API_PROXY_TARGET=https://live-republic-server.fly.dev",
+        "npm",
+        "run",
+        "dev",
+        "--prefix",
+        "apps/customer-web"
+      ],
+      "port": 3001
     }
   ]
 }
