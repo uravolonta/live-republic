@@ -32,6 +32,8 @@ data class ViewerLiveResponse(
     val id: Long,
     val title: String,
     val status: LiveStatus,
+    /** SNS 공유 미리보기(Open Graph)용. */
+    val thumbnailUrl: String?,
     /** 방송 중(LIVE)일 때만 내려간다. */
     val playbackUrl: String?,
     val currentProduct: ViewerProduct?,
@@ -78,12 +80,14 @@ class ViewerController(
             id = live.id!!,
             title = live.title,
             status = live.status,
+            thumbnailUrl = live.thumbnailUrl,
             playbackUrl = if (live.status == LiveStatus.LIVE) live.ivsPlaybackUrl else null,
             currentProduct = if (live.status == LiveStatus.LIVE) currentProduct else null,
         )
-        // 3초 폴링을 CDN·브라우저 캐시가 흡수하도록 짧게 캐시한다.
+        // 3초 폴링을 CDN이 흡수하도록 짧게 캐시한다. stale 허용을 1초로 제한해
+        // 상품 전환·종료가 폴링 한 주기(3초) 안에 시청자에게 닿게 한다.
         return ResponseEntity.ok()
-            .header("Cache-Control", "public, max-age=1, s-maxage=2, stale-while-revalidate=5")
+            .header("Cache-Control", "public, max-age=0, s-maxage=1, stale-while-revalidate=1")
             .body(body)
     }
 }
