@@ -68,10 +68,6 @@ class Live(
     @Column(name = "ivs_stream_key_arn")
     var ivsStreamKeyArn: String? = null,
 
-    /** 송출 임대 토큰의 SHA-256 해시 — 방송 단말 식별 (평문은 start 응답으로만 1회 전달). */
-    @Column(name = "broadcast_token_hash")
-    var broadcastTokenHash: String? = null,
-
     @Column(name = "ivs_playback_url")
     var ivsPlaybackUrl: String? = null,
 
@@ -149,6 +145,13 @@ interface LiveRepository : JpaRepository<Live, Long> {
         "select l from Live l where l.id = :id and l.shopId = :shopId",
     )
     fun findByIdAndShopIdForUpdate(id: Long, shopId: Long): Live?
+
+    /** Shop의 진행 중(STARTING·LIVE) 방송 — 시작·재개 판단을 위한 잠금 조회. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query(
+        "select l from Live l where l.shopId = :shopId and l.status in :statuses",
+    )
+    fun findActiveByShopIdForUpdate(shopId: Long, statuses: Collection<LiveStatus>): Live?
 }
 
 interface LiveProductRepository : JpaRepository<LiveProduct, Long> {

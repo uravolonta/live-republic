@@ -102,3 +102,26 @@ export type Product = {
   skus: Sku[];
   optionGroups?: { name: string; options: string[] }[] | null;
 };
+
+/** 방송 제어 대시보드 (Issue #5 정책 개편, 2026-08-28) */
+export type BroadcastLive = {
+  id: number;
+  title: string;
+  status: LiveStatus;
+  startedAt: string | null;
+  currentLiveProductId: number | null;
+  products: { liveProductId: number; productId: number; name: string }[];
+  playbackUrl: string | null;
+};
+
+export type CurrentBroadcast = { live: BroadcastLive | null };
+
+export type AppSessionInfo = {
+  session: { accountName: string; loginAt: string } | null;
+};
+
+export type ProductConfigEntry = {
+  productId: number;
+  name: string;
+  position: number;
+};

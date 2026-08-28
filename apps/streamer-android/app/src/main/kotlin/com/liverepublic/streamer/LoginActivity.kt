@@ -36,9 +36,11 @@ class LoginActivity : AppCompatActivity() {
             }
             loginButton.isEnabled = false
             lifecycleScope.launch {
+                // X-Client: 방송 앱 로그인은 테넌트당 1개 세션만 허용된다 (서버가 강제).
                 val result = ApiClient.post(
                     "/api/auth/login",
                     JSONObject().put("email", loginId).put("password", password),
+                    headers = mapOf("X-Client" to "streamer-app"),
                 )
                 loginButton.isEnabled = true
                 when {
@@ -47,12 +49,13 @@ class LoginActivity : AppCompatActivity() {
                         if (me.optBoolean("mustChangePassword")) {
                             startActivity(Intent(this@LoginActivity, ChangePasswordActivity::class.java))
                         } else {
-                            startActivity(Intent(this@LoginActivity, LiveListActivity::class.java))
+                            startActivity(Intent(this@LoginActivity, BroadcastActivity::class.java))
                         }
                         // 로그인 폼이 백스택에 남지 않게 한다 (뒤로 가기로 되돌아오지 않도록).
                         finish()
                     }
                     result.status == 401 -> toast("로그인 정보가 올바르지 않습니다.")
+                    // 409: 다른 계정이 앱을 사용 중 — Owner가 대시보드에서 로그아웃해야 한다.
                     result.status == 0 -> toast("서버에 연결할 수 없습니다.")
                     else -> toast(ApiClient.errorMessage(result, "로그인에 실패했습니다."))
                 }

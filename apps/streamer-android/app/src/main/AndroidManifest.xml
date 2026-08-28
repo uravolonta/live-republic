@@ -20,8 +20,6 @@
             </intent-filter>
         </activity>
         <activity android:name=".ChangePasswordActivity" />
-        <activity android:name=".LiveListActivity" />
-        <activity android:name=".GuerrillaActivity" />
         <!-- 방송 중 구성 변경(다크 모드 자동 전환·언어·표시 크기 등)으로 Activity가 재생성되면
              송출이 끊긴다 — 재생성 없이 흡수한다. -->
         <activity

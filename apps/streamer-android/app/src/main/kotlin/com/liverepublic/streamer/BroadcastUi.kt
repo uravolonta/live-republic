@@ -1,74 +1,80 @@
 package com.liverepublic.streamer
 
 /**
- * 방송 화면의 상태 전이 표시 규칙 — Activity에서 분리해 단위 테스트한다.
+ * 방송 화면의 상태 전이 규칙 — Activity에서 분리해 단위 테스트한다.
+ * 정책(2026-08-28): 앱은 테넌트당 1개 세션만 로그인되므로 이 단말이 곧 방송 단말이다.
+ * status: null(진행 중 방송 없음) 또는 서버 Live 상태.
  * connectionState: SDK 연결 상태(CONNECTING/CONNECTED/DISCONNECTED/ERROR) 또는 null(미시작).
  */
 object BroadcastUi {
 
-    fun statusLabel(status: String, title: String, connectionState: String?): String = when {
+    const val ACTION_START = "START" // 서버 start 호출 — 새 방송 시작 또는 진행 중 방송 재개
+    const val ACTION_END = "END"
+
+    fun statusLabel(status: String?, title: String, connectionState: String?): String = when {
+        status == null -> "방송 준비 — 시작을 누르면 즉시 라이브가 시작됩니다"
+        // ERROR는 재연결을 포기했거나 회복 불가 오류가 난 상태 — '자동 재연결 대기'로
+        // 표시하면 사용자가 기다리기만 하게 된다. 수동 재개가 필요함을 알린다.
+        (status == "LIVE" || status == "STARTING") && connectionState == "ERROR" ->
+            "송출 중단 — '송출 재개'로 다시 시작하세요 — $title"
         status == "LIVE" && connectionState == "CONNECTED" -> "● 방송중 (송출 연결됨) — $title"
         status == "LIVE" && connectionState == "CONNECTING" -> "재연결 시도 중… — $title"
-        status == "LIVE" && (connectionState == "DISCONNECTED" || connectionState == "ERROR") ->
-            "연결 끊김 — 자동 재연결 대기 — $title"
+        status == "LIVE" && connectionState == "DISCONNECTED" -> "연결 끊김 — 자동 재연결 대기 — $title"
         status == "LIVE" -> "● 방송중 — $title"
         status == "STARTING" && connectionState == "CONNECTED" -> "방송 확정 중… — $title"
         status == "STARTING" -> "송출 연결 중… — $title"
-        status == "SCHEDULED" -> "방송 준비 — $title"
         else -> "$title ($status)"
     }
 
-    const val ACTION_START = "START"
-    const val ACTION_END = "END"
-    const val ACTION_NONE = "NONE"
-
     /**
-     * (버튼 라벨, 활성화 여부, 동작 종류). 서버가 내려준 capability로 판단한다:
-     * canControl = 이 단말이 송출 임대를 보유, canBroadcast = 임대를 (재)획득할 수 있음,
-     * canForceEnd = Owner의 강제 종료 권한.
-     * 라벨과 클릭 동작을 여기서 함께 결정한다 — Owner 단말이 임대를 잃으면
-     * canBroadcast·canForceEnd가 동시에 참이므로, 별도 분기로 배선하면
-     * "송출 재개" 라벨에 종료 동작이 붙는 어긋남이 생긴다 (실기기에서 적발).
+     * 표시할 버튼 목록 (라벨, 동작) — 첫 항목이 주 버튼이다.
+     * 라벨과 클릭 동작을 함께 결정한다 (분리 배선의 어긋남 방지 — 실기기에서 적발된 규칙).
      */
-    fun action(
-        status: String,
-        canControl: Boolean,
-        canBroadcast: Boolean,
-        canForceEnd: Boolean,
+    fun actions(
+        status: String?,
+        streaming: Boolean,
+        streamFailed: Boolean,
         endRequested: Boolean,
-    ): Triple<String, Boolean, String> = when {
-        status == "SCHEDULED" -> Triple("방송 시작", true, ACTION_START)
-        status != "STARTING" && status != "LIVE" -> Triple("종료된 방송입니다", false, ACTION_NONE)
-        endRequested -> Triple("방송 종료 (재시도)", true, ACTION_END)
-        canControl -> Triple(if (status == "STARTING") "시작 취소" else "방송 종료", true, ACTION_END)
-        canBroadcast -> Triple("송출 재개 (이 단말로 이어서 방송)", true, ACTION_START)
-        canForceEnd -> Triple("방송 강제 종료 (Owner)", true, ACTION_END)
-        else -> Triple("시작한 단말에서 조작할 수 있습니다", false, ACTION_NONE)
+    ): List<Pair<String, String>> = when {
+        status == null -> listOf("방송 시작" to ACTION_START)
+        status != "STARTING" && status != "LIVE" -> emptyList()
+        endRequested -> listOf("방송 종료 (재시도)" to ACTION_END)
+        streamFailed -> listOf(
+            "송출 재개" to ACTION_START,
+            (if (status == "STARTING") "시작 취소" else "방송 종료") to ACTION_END,
+        )
+        streaming -> listOf((if (status == "STARTING") "시작 취소" else "방송 종료") to ACTION_END)
+        // 진행 중 방송 + 미송출 = 앱 재시작·재로그인 복구 화면 — 재개와 종료를 함께 준다.
+        else -> listOf(
+            "송출 재개 (이어서 방송)" to ACTION_START,
+            (if (status == "STARTING") "시작 취소" else "방송 종료") to ACTION_END,
+        )
     }
 
     /**
-     * 송출을 (재)시작해야 하는가 — 임대 자격이 있고, 세션을 아직 시작하지 않았고,
-     * 종료 의도가 없고, 송출이 실패로 끝난 상태(failed: 재연결 포기·치명적 오류)가 아닐 때.
-     * 실패 후에는 사용자의 명시적 재개(start 재호출)만 허용한다 — 폴링 갱신이 자동
-     * 재송출을 반복하지 않게 한다.
+     * 송출을 (재)시작해야 하는가 — 이번 앱 실행에서 서버 start로 자격을 받았고(authorized),
+     * 세션을 아직 시작하지 않았고, 종료 의도가 없고, 실패 상태가 아닐 때.
+     * authorized 조건: 화면 조회(current)만으로 자동 송출하지 않는다 — 재개는 서버 start를
+     * 거쳐야 이전 단말 송출 여부 검증·Key 정합이 보장된다.
      */
     fun shouldStartStreaming(
-        status: String,
+        status: String?,
         hasCredentials: Boolean,
+        authorized: Boolean,
         sessionStarted: Boolean,
         endRequested: Boolean,
         failed: Boolean = false,
     ): Boolean =
-        (status == "STARTING" || status == "LIVE") && hasCredentials &&
+        (status == "STARTING" || status == "LIVE") && hasCredentials && authorized &&
             !sessionStarted && !endRequested && !failed
 
-    /** 서버 확정을 호출해야 하는가 — 임대 보유 단말이 SDK 연결됐고 종료 의도가 없을 때. */
-    fun shouldConfirm(status: String, connected: Boolean, canControl: Boolean, endRequested: Boolean): Boolean =
-        connected && canControl && !endRequested && (status == "STARTING" || status == "LIVE")
+    /** 서버 확정을 호출해야 하는가 — SDK가 연결됐고 종료 의도가 없을 때. */
+    fun shouldConfirm(status: String?, connected: Boolean, endRequested: Boolean): Boolean =
+        connected && !endRequested && (status == "STARTING" || status == "LIVE")
 
     /**
      * confirm 응답별 재시도 여부 — SDK 연결이 유지될 때 IVS 감지 지연(409)·
-     * 통신 단절(0)·서버 오류(5xx)만 재시도한다. 그 외(403 임대 상실 등)는 중단.
+     * 통신 단절(0)·서버 오류(5xx)만 재시도한다.
      */
     fun confirmShouldRetry(httpStatus: Int, connected: Boolean): Boolean =
         connected && (httpStatus == 409 || httpStatus == 0 || httpStatus >= 500)
@@ -84,16 +90,10 @@ object BroadcastUi {
         pendingId?.takeIf { it != attemptedId || !succeeded }
 
     /**
-     * 뒤로가기를 종료 확인 다이얼로그로 막아야 하는가 — 이 단말이 실제 송출에 관여할 때만.
-     * 열람만 하는 Owner 단말이나 인수당해 송출이 멈춘 구 단말은 그냥 나갈 수 있어야 한다 —
-     * 전자는 '종료 후 나가기'가 진행 중 방송을 실제로 끊는 파괴적 동작이 되고,
-     * 후자는 종료가 403으로 계속 실패해 화면에 갇힌다.
+     * 뒤로가기를 종료 확인 다이얼로그로 막아야 하는가 — 이 단말이 실제 송출 중이거나
+     * 종료 결과를 확인해야 할 때만. 송출하지 않는 상태에서는 그냥 나갈 수 있다
+     * (방송 슬롯은 유지되며 재진입 시 재개할 수 있다).
      */
-    fun shouldBlockExit(
-        status: String,
-        canControl: Boolean,
-        sessionStarted: Boolean,
-        endRequested: Boolean,
-    ): Boolean =
-        (status == "STARTING" || status == "LIVE") && (canControl || sessionStarted || endRequested)
+    fun shouldBlockExit(status: String?, sessionStarted: Boolean, endRequested: Boolean): Boolean =
+        (status == "STARTING" || status == "LIVE") && (sessionStarted || endRequested)
 }

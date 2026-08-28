@@ -44,9 +44,8 @@ class ChangePasswordActivity : AppCompatActivity() {
                 when (result.status) {
                     200 -> {
                         Toast.makeText(this@ChangePasswordActivity, "변경되었습니다.", Toast.LENGTH_SHORT).show()
-                        // 백스택의 기존 LiveList 위에 새 인스턴스가 쌓이지 않게 정리한다.
                         startActivity(
-                            Intent(this@ChangePasswordActivity, LiveListActivity::class.java)
+                            Intent(this@ChangePasswordActivity, BroadcastActivity::class.java)
                                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP),
                         )
                         finish()
