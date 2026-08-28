@@ -13,8 +13,8 @@ import org.springframework.data.jpa.repository.Modifying
 import org.springframework.data.jpa.repository.Query
 import java.time.OffsetDateTime
 
-/** LIVE·ENDED는 Issue #5에서 추가한다. */
-enum class LiveStatus { SCHEDULED, CANCELLED }
+/** STARTING: 시작 요청·송출 자격 발급 후 실제 IVS 연결 확인 대기. 종료 시 SCHEDULED로 복귀한다. */
+enum class LiveStatus { SCHEDULED, STARTING, LIVE, ENDED, CANCELLED }
 
 /**
  * 예정 Live — 변경·취소 가능한 사전 예고. 예정 시각이 지나도 자동으로 상태가 바뀌지 않으며,
@@ -44,6 +44,41 @@ class Live(
     @Column(name = "thumbnail_url")
     var thumbnailUrl: String? = null,
 
+    /** 실제 방송 시각 — 예정 시각(scheduledStartAt)과 구분된다. */
+    @Column(name = "started_at")
+    var startedAt: OffsetDateTime? = null,
+
+    @Column(name = "ended_at")
+    var endedAt: OffsetDateTime? = null,
+
+    /** 방송을 시작한 사용자 (같은 Shop의 OWNER 또는 STREAMER). */
+    @Column(name = "started_by_user_id")
+    var startedByUserId: Long? = null,
+
+    @Column(name = "ivs_channel_arn")
+    var ivsChannelArn: String? = null,
+
+    @Column(name = "ivs_ingest_endpoint")
+    var ivsIngestEndpoint: String? = null,
+
+    @Column(name = "ivs_stream_key")
+    var ivsStreamKey: String? = null,
+
+    /** 종료 시 Key 폐기(DeleteStreamKey)를 위해 ARN을 보존한다. */
+    @Column(name = "ivs_stream_key_arn")
+    var ivsStreamKeyArn: String? = null,
+
+    @Column(name = "ivs_playback_url")
+    var ivsPlaybackUrl: String? = null,
+
+    /** 실제 연결이 확인된 IVS Stream Session 식별자 (사용량 근거 보존). */
+    @Column(name = "ivs_stream_session_id")
+    var ivsStreamSessionId: String? = null,
+
+    /** 방송 중 현재 판매 상품 (live_product id). */
+    @Column(name = "current_live_product_id")
+    var currentLiveProductId: Long? = null,
+
     @Column(name = "created_at", nullable = false, insertable = false, updatable = false)
     val createdAt: OffsetDateTime? = null,
 
@@ -69,9 +104,54 @@ class LiveProduct(
     val position: Int,
 )
 
+/** Live 한 번의 방송에서 발생한 IVS Stream Session 이력 (재연결마다 1행). */
+@Entity
+@Table(name = "live_stream_session")
+class LiveStreamSession(
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    val id: Long? = null,
+
+    @Column(name = "live_id", nullable = false)
+    val liveId: Long,
+
+    @Column(name = "ivs_channel_arn", nullable = false)
+    val ivsChannelArn: String,
+
+    @Column(name = "ivs_stream_id", nullable = false)
+    val ivsStreamId: String,
+
+    @Column(name = "started_at", nullable = false)
+    val startedAt: OffsetDateTime,
+
+    @Column(name = "ended_at")
+    var endedAt: OffsetDateTime? = null,
+)
+
+interface LiveStreamSessionRepository : JpaRepository<LiveStreamSession, Long> {
+    fun findAllByLiveIdOrderById(liveId: Long): List<LiveStreamSession>
+    fun findFirstByLiveIdAndEndedAtIsNullOrderByIdDesc(liveId: Long): LiveStreamSession?
+}
+
 interface LiveRepository : JpaRepository<Live, Long> {
     fun findAllByShopIdOrderByScheduledStartAtDesc(shopId: Long): List<Live>
+    fun findAllByShopIdAndStatusOrderByScheduledStartAtDesc(shopId: Long, status: LiveStatus): List<Live>
     fun findByIdAndShopId(id: Long, shopId: Long): Live?
+    fun existsByShopIdAndStatus(shopId: Long, status: LiveStatus): Boolean
+
+    /** 방송 시작·종료·상품 전환의 동시 실행을 직렬화하기 위한 쓰기 잠금 조회. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query(
+        "select l from Live l where l.id = :id and l.shopId = :shopId",
+    )
+    fun findByIdAndShopIdForUpdate(id: Long, shopId: Long): Live?
+
+    /** Shop의 진행 중(STARTING·LIVE) 방송 — 시작·재개 판단을 위한 잠금 조회. */
+    @org.springframework.data.jpa.repository.Lock(jakarta.persistence.LockModeType.PESSIMISTIC_WRITE)
+    @org.springframework.data.jpa.repository.Query(
+        "select l from Live l where l.shopId = :shopId and l.status in :statuses",
+    )
+    fun findActiveByShopIdForUpdate(shopId: Long, statuses: Collection<LiveStatus>): Live?
 }
 
 interface LiveProductRepository : JpaRepository<LiveProduct, Long> {

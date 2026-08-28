@@ -54,7 +54,12 @@ data class ChangePasswordRequest(
 class AuthController(
     private val authService: AuthService,
     private val securityContextRepository: SecurityContextRepository,
+    private val appSessionService: AppSessionService,
 ) {
+
+    companion object {
+        const val STREAMER_APP_CLIENT = "streamer-app"
+    }
 
     @PostMapping("/signup")
     @ResponseStatus(HttpStatus.CREATED)
@@ -69,6 +74,7 @@ class AuthController(
     @PostMapping("/login")
     fun login(
         @RequestBody request: LoginRequest,
+        @org.springframework.web.bind.annotation.RequestHeader(name = "X-Client", required = false) client: String?,
         httpRequest: HttpServletRequest,
         httpResponse: HttpServletResponse,
     ): MeResponse {
@@ -76,7 +82,17 @@ class AuthController(
 
         // 세션 고정 공격 방지를 위해 로그인 시 세션을 새로 발급한다.
         httpRequest.getSession(false)?.invalidate()
-        httpRequest.getSession(true)
+        val session = httpRequest.getSession(true)
+        // 방송 앱은 테넌트당 1개 세션만 허용한다 (2026-08-28 사람 결정) —
+        // 같은 계정 재로그인은 이전 세션을 대체하고, 다른 계정은 거절된다.
+        if (client == STREAMER_APP_CLIENT) {
+            try {
+                appSessionService.claim(user.id, session.id)
+            } catch (e: Exception) {
+                session.invalidate()
+                throw e
+            }
+        }
         saveAuthentication(user, httpRequest, httpResponse)
 
         return toMeResponse(user)
@@ -118,7 +134,11 @@ class AuthController(
     @PostMapping("/logout")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     fun logout(httpRequest: HttpServletRequest) {
-        httpRequest.getSession(false)?.invalidate()
+        httpRequest.getSession(false)?.let { session ->
+            // 앱 세션이었다면 테넌트의 앱 세션 슬롯도 비운다.
+            appSessionService.release(session.id)
+            session.invalidate()
+        }
         SecurityContextHolder.clearContext()
     }
 

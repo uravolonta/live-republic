@@ -30,6 +30,8 @@ dependencies {
 	implementation("org.flywaydb:flyway-database-postgresql")
 	// Excel 상품 일괄등록 (Issue #14)
 	implementation("org.apache.poi:poi-ooxml:5.5.1")
+	// AWS IVS Channel 관리 (Issue #5)
+	implementation("software.amazon.awssdk:ivs:2.54.2")
 	implementation("org.jetbrains.kotlin:kotlin-reflect")
 	implementation("tools.jackson.module:jackson-module-kotlin")
 	runtimeOnly("org.postgresql:postgresql")

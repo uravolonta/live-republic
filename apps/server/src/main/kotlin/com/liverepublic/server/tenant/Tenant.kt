@@ -48,6 +48,7 @@ interface TenantRepository : JpaRepository<Tenant, Long>
 
 interface MembershipRepository : JpaRepository<Membership, Long> {
     fun findByUserIdAndRole(userId: Long, role: MembershipRole): Membership?
+    fun findAllByUserId(userId: Long): List<Membership>
     fun findAllByTenantIdAndRole(tenantId: Long, role: MembershipRole): List<Membership>
     fun findByUserIdAndTenantId(userId: Long, tenantId: Long): Membership?
 }

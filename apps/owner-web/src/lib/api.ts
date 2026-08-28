@@ -52,10 +52,12 @@ export type Streamer = {
   mustChangePassword: boolean;
 };
 
+export type LiveStatus = "SCHEDULED" | "STARTING" | "LIVE" | "ENDED" | "CANCELLED";
+
 export type LiveSummary = {
   id: number;
   title: string;
-  status: "SCHEDULED" | "CANCELLED";
+  status: LiveStatus;
   scheduledStartAt: string;
   thumbnailUrl: string | null;
   productCount: number;
@@ -65,7 +67,7 @@ export type LiveSummary = {
 export type LiveDetail = {
   id: number;
   title: string;
-  status: "SCHEDULED" | "CANCELLED";
+  status: LiveStatus;
   scheduledStartAt: string;
   thumbnailUrl: string | null;
   products: { productId: number; name: string; price: number; position: number }[];
@@ -99,4 +101,27 @@ export type Product = {
   description: string | null;
   skus: Sku[];
   optionGroups?: { name: string; options: string[] }[] | null;
+};
+
+/** 방송 제어 대시보드 (Issue #5 정책 개편, 2026-08-28) */
+export type BroadcastLive = {
+  id: number;
+  title: string;
+  status: LiveStatus;
+  startedAt: string | null;
+  currentLiveProductId: number | null;
+  products: { liveProductId: number; productId: number; name: string }[];
+  playbackUrl: string | null;
+};
+
+export type CurrentBroadcast = { live: BroadcastLive | null };
+
+export type AppSessionInfo = {
+  session: { accountName: string; loginAt: string } | null;
+};
+
+export type ProductConfigEntry = {
+  productId: number;
+  name: string;
+  position: number;
 };

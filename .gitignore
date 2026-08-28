@@ -5,6 +5,9 @@
 /vertical-slices/
 /outputs/
 
+# Local issue/review context notes (리뷰 컨텍스트 기록 — 커밋하지 않음)
+/issue_history/
+
 # Local environment and secrets
 .env
 .env.*

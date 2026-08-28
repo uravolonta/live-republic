@@ -140,10 +140,16 @@ export default function Home() {
       </section>
 
       <Link
-        href="/lives"
+        href="/broadcast"
         className="rounded-lg bg-black px-4 py-2 text-center text-white"
       >
-        Live 관리
+        방송 제어 (앱 세션·상품 구성)
+      </Link>
+      <Link
+        href="/lives"
+        className="rounded-lg border px-4 py-2 text-center"
+      >
+        Live 예정·이력
       </Link>
       <Link
         href="/products"

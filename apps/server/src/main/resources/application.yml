@@ -11,6 +11,9 @@ spring:
       ddl-auto: validate
     open-in-view: false
   session:
+    # 방송(최대 수 시간) 중 상호작용이 없어도 종료 요청이 실패하지 않도록 여유를 둔다.
+    # (기본 30분이면 장시간 방송 후 종료가 401이 된다 — heartbeat·재인증 정교화는 후속 티켓)
+    timeout: 12h
     jdbc:
       initialize-schema: always
   web:

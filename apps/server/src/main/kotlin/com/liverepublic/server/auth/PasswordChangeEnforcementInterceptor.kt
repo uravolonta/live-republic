@@ -34,6 +34,8 @@ class PasswordChangeEnforcementInterceptor : HandlerInterceptor {
             ?: return true
         if (!principal.mustChangePassword) return true
         if (request.requestURI in allowedPaths || !request.requestURI.startsWith("/api/")) return true
+        // 클라이언트가 다른 사유의 403과 구분할 수 있도록 전용 헤더를 함께 내린다.
+        response.setHeader("X-Password-Change-Required", "true")
         response.sendError(HttpServletResponse.SC_FORBIDDEN, "비밀번호를 변경한 뒤 사용할 수 있습니다.")
         return false
     }

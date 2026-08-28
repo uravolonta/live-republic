@@ -1,17 +1,31 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="true" />
+
     <application
         android:label="Live Republic Streamer"
-        android:theme="@android:style/Theme.Material.Light">
+        android:theme="@style/Theme.AppCompat.DayNight.NoActionBar"
+        android:usesCleartextTraffic="false">
         <activity
-            android:name=".MainActivity"
+            android:name=".LoginActivity"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".ChangePasswordActivity" />
+        <!-- 방송 중 구성 변경(다크 모드 자동 전환·언어·표시 크기 등)으로 Activity가 재생성되면
+             송출이 끊긴다 — 재생성 없이 흡수한다. -->
+        <activity
+            android:name=".BroadcastActivity"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|uiMode|density|locale|layoutDirection|fontScale"
+            android:screenOrientation="portrait" />
     </application>
 
 </manifest>
