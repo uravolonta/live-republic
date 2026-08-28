@@ -64,41 +64,81 @@ class BroadcastController(
     private val productRepository: ProductRepository,
     private val productService: ProductService,
     private val userRepository: com.liverepublic.server.user.UserAccountRepository,
+    private val appSessionService: com.liverepublic.server.auth.AppSessionService,
 ) {
 
-    /** 앱 진입 시 현재 상태 — 진행 중 방송이 있으면 그 상세(자격 포함)를 돌려준다. */
-    @GetMapping("/current")
-    fun current(@AuthenticationPrincipal user: AuthUser): CurrentBroadcastResponse =
-        CurrentBroadcastResponse(broadcastService.currentBroadcast(user.id)?.let { toDetail(it) })
+    /** 이 요청이 방송 단말(테넌트의 유일한 앱 세션)에서 왔는가. */
+    private fun isDevice(user: AuthUser, request: jakarta.servlet.http.HttpServletRequest): Boolean =
+        appSessionService.isAppSession(user.id, request.getSession(false)?.id)
+
+    private fun requireDevice(user: AuthUser, request: jakarta.servlet.http.HttpServletRequest) {
+        if (!isDevice(user, request)) {
+            throw org.springframework.web.server.ResponseStatusException(
+                org.springframework.http.HttpStatus.FORBIDDEN, "방송 앱(단말 세션)에서만 사용할 수 있습니다.",
+            )
+        }
+    }
 
     /**
-     * 방송 즉시 시작 또는 재개. 예약 선택 없이 사전 구성(없으면 판매 중 전체) 상품으로
-     * 새 Live를 만들어 시작한다. 진행 중 방송이 있으면 재개 자격을 돌려준다.
+     * 앱 진입 시 현재 상태 — 진행 중 방송이 있으면 그 상세를 돌려준다.
+     * 송출 자격(streamKey)은 방송 단말 세션에만 내려간다 — 같은 계정의 Web 세션도
+     * 단말이 아니므로 받지 못한다 (세션=단말 정책의 완결).
+     */
+    @GetMapping("/current")
+    fun current(
+        @AuthenticationPrincipal user: AuthUser,
+        request: jakarta.servlet.http.HttpServletRequest,
+    ): CurrentBroadcastResponse = CurrentBroadcastResponse(
+        broadcastService.currentBroadcast(user.id)?.let { toDetail(it, holdsDevice = isDevice(user, request)) },
+    )
+
+    /**
+     * 방송 즉시 시작 또는 재개 — 방송 단말 세션 전용. 예약 선택 없이 사전 구성
+     * (없으면 판매 중 전체) 상품으로 새 Live를 만들어 시작한다.
      */
     @PostMapping("/start")
-    fun start(@AuthenticationPrincipal user: AuthUser): BroadcastLiveDetail =
-        toDetail(broadcastService.start(user.id))
+    fun start(
+        @AuthenticationPrincipal user: AuthUser,
+        request: jakarta.servlet.http.HttpServletRequest,
+    ): BroadcastLiveDetail {
+        requireDevice(user, request)
+        return toDetail(broadcastService.start(user.id), holdsDevice = true)
+    }
 
-    /** SDK 연결(CONNECTED) 확인 후 방송 중 확정. */
+    /**
+     * SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 방송 단말 세션 전용.
+     * 상태·사용량 이력(BM 근거)을 바꾸므로 실제 송출 단말만 호출할 수 있다.
+     */
     @PostMapping("/lives/{liveId}/confirm")
     fun confirm(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.confirm(user.id, liveId))
+        request: jakarta.servlet.http.HttpServletRequest,
+    ): BroadcastLiveDetail {
+        requireDevice(user, request)
+        return toDetail(broadcastService.confirm(user.id, liveId), holdsDevice = true)
+    }
 
+    /** 종료는 방송 단말 또는 같은 Shop 구성원(Owner 대시보드 강제 종료)이 호출한다. */
     @PostMapping("/lives/{liveId}/end")
     fun end(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
-    ): BroadcastLiveDetail = toDetail(broadcastService.end(user.id, liveId))
+        request: jakarta.servlet.http.HttpServletRequest,
+    ): BroadcastLiveDetail =
+        toDetail(broadcastService.end(user.id, liveId), holdsDevice = isDevice(user, request))
 
+    /** 송출 오버레이의 상품 전환 — 방송 단말 세션 전용. */
     @PutMapping("/lives/{liveId}/current-product")
     fun switchProduct(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
         @Valid @RequestBody request: SwitchProductRequest,
-    ): BroadcastLiveDetail =
-        toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId))
+        httpRequest: jakarta.servlet.http.HttpServletRequest,
+    ): BroadcastLiveDetail {
+        requireDevice(user, httpRequest)
+        return toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId), holdsDevice = true)
+    }
 
     // ── Owner 대시보드 (방송 제어) ────────────────────────────────────────────
 
@@ -134,7 +174,7 @@ class BroadcastController(
         return config.map { ProductConfigEntry(productId = it.productId, name = names[it.productId] ?: "", position = it.position) }
     }
 
-    private fun toDetail(live: Live): BroadcastLiveDetail {
+    private fun toDetail(live: Live, holdsDevice: Boolean): BroadcastLiveDetail {
         val liveProducts = broadcastService.activeLiveProducts(live.id!!)
         val products = productRepository.findAllById(liveProducts.map { it.productId }).associateBy { it.id }
         val skusByProduct = productService.listSkusByProducts(liveProducts.map { it.productId })
@@ -152,7 +192,9 @@ class BroadcastController(
                 )
             }
         }
-        val active = live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE
+        // 송출 자격은 진행 중 + 방송 단말 세션에만 내려간다.
+        val grantsCredentials = holdsDevice &&
+            (live.status == LiveStatus.STARTING || live.status == LiveStatus.LIVE)
         return BroadcastLiveDetail(
             id = live.id!!,
             title = live.title,
@@ -161,9 +203,9 @@ class BroadcastController(
             endedAt = live.endedAt,
             currentLiveProductId = live.currentLiveProductId,
             products = productInfos,
-            ingestEndpoint = if (active) live.ivsIngestEndpoint else null,
-            streamKey = if (active) live.ivsStreamKey else null,
-            playbackUrl = if (active) live.ivsPlaybackUrl else null,
+            ingestEndpoint = if (grantsCredentials) live.ivsIngestEndpoint else null,
+            streamKey = if (grantsCredentials) live.ivsStreamKey else null,
+            playbackUrl = if (grantsCredentials) live.ivsPlaybackUrl else null,
         )
     }
 }

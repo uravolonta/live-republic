@@ -104,6 +104,18 @@ class AppSessionService(
         return existing
     }
 
+    /**
+     * 이 요청 세션이 테넌트의 방송 앱 세션(=방송 단말)인가.
+     * 같은 계정의 Web 세션은 방송 조작·자격 수신 대상이 아니다 — 세션이 단말의
+     * 증명이라는 정책의 완결을 위해 자격·확정은 이 세션에만 허용한다.
+     */
+    @Transactional(readOnly = true)
+    fun isAppSession(userId: Long, sessionId: String?): Boolean {
+        if (sessionId == null) return false
+        val membership = membershipRepository.findAllByUserId(userId).firstOrNull() ?: return false
+        return appSessionRepository.findById(membership.tenantId).orElse(null)?.sessionId == sessionId
+    }
+
     /** Owner의 강제 로그아웃 — 세션 저장소에서 지워 다음 요청부터 401이 된다. */
     @Transactional
     fun forceLogout(tenantId: Long) {

@@ -478,6 +478,41 @@ class BroadcastFlowTest {
     }
 
     @Test
+    fun `같은 계정이라도 단말(앱 세션)이 아니면 자격을 받거나 시작·확정·전환할 수 없다`() {
+        val web = signupOwner("bc-device@test.local")
+        createProduct(web, "단말 상품")
+        val app = appLogin("bc-device@test.local", "password-123")
+
+        // 시작은 방송 단말 세션 전용 — 같은 계정의 Web 세션도 403.
+        mockMvc.perform(post("/api/broadcast/start").cookie(web))
+            .andExpect(status().isForbidden)
+
+        val started = startBroadcast(app)
+        val liveId = started.get("id").asLong()
+        val lp = started.get("products").get(0).get("liveProductId").asLong()
+
+        // Web 세션의 상태 조회는 가능하지만 송출 자격(streamKey)은 내려가지 않는다.
+        mockMvc.perform(get("/api/broadcast/current").cookie(web))
+            .andExpect(jsonPath("$.live.id").value(liveId))
+            .andExpect(jsonPath("$.live.streamKey").value(org.hamcrest.Matchers.nullValue()))
+        mockMvc.perform(get("/api/broadcast/current").cookie(app))
+            .andExpect(jsonPath("$.live.streamKey").value(org.hamcrest.Matchers.startsWith("sk_stub")))
+
+        // 확정(사용량 이력)·상품 전환도 방송 단말 전용.
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(web))
+            .andExpect(status().isForbidden)
+        mockMvc.perform(
+            put("/api/broadcast/lives/$liveId/current-product").cookie(web)
+                .contentType(MediaType.APPLICATION_JSON).content("""{"liveProductId":$lp}"""),
+        ).andExpect(status().isForbidden)
+
+        // 종료는 Owner 대시보드(Web)에서도 가능해야 한다 (강제 종료 경로).
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(web))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.status").value("ENDED"))
+    }
+
+    @Test
     fun `다른 Shop 사용자는 남의 방송을 조작할 수 없다`() {
         val webA = signupOwner("bc-a@test.local")
         createProduct(webA, "A 상품")
