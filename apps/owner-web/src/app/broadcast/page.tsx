@@ -25,6 +25,7 @@ export default function BroadcastControlPage() {
   const [configIds, setConfigIds] = useState<number[]>([]);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [loadFailed, setLoadFailed] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -38,6 +39,13 @@ export default function BroadcastControlPage() {
       router.replace("/login");
       return;
     }
+    // 조회 실패를 "방송 없음·세션 없음"으로 표시하면 안 된다 — 기존 표시를 유지하고
+    // 실패 배너만 띄운다.
+    if (currentRes.status !== 200 || sessionRes.status !== 200) {
+      setLoadFailed(true);
+      return;
+    }
+    setLoadFailed(false);
     setCurrent(currentRes.body);
     setAppSession(sessionRes.body);
     setAllProducts(productRes.body ?? []);
@@ -115,6 +123,12 @@ export default function BroadcastControlPage() {
         </Link>
       </header>
 
+      {loadFailed && (
+        <p className="rounded border border-amber-500 p-2 text-sm text-amber-600">
+          상태를 불러오지 못했습니다 — 표시된 정보가 오래되었을 수 있습니다. 잠시 후
+          자동으로 다시 시도합니다.
+        </p>
+      )}
       {message && <p className="text-sm text-green-600">{message}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 

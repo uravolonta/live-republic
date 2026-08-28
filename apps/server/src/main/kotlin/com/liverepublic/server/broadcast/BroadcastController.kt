@@ -67,17 +67,12 @@ class BroadcastController(
     private val appSessionService: com.liverepublic.server.auth.AppSessionService,
 ) {
 
-    /** 이 요청이 방송 단말(테넌트의 유일한 앱 세션)에서 왔는가. */
-    private fun isDevice(user: AuthUser, request: jakarta.servlet.http.HttpServletRequest): Boolean =
-        appSessionService.isAppSession(user.id, request.getSession(false)?.id)
+    private fun sessionId(request: jakarta.servlet.http.HttpServletRequest): String? =
+        request.getSession(false)?.id
 
-    private fun requireDevice(user: AuthUser, request: jakarta.servlet.http.HttpServletRequest) {
-        if (!isDevice(user, request)) {
-            throw org.springframework.web.server.ResponseStatusException(
-                org.springframework.http.HttpStatus.FORBIDDEN, "방송 앱(단말 세션)에서만 사용할 수 있습니다.",
-            )
-        }
-    }
+    /** 이 요청이 방송 단말(테넌트의 유일한 앱 세션)에서 왔는가 — 표시(자격 응답)용. */
+    private fun isDevice(user: AuthUser, request: jakarta.servlet.http.HttpServletRequest): Boolean =
+        appSessionService.isAppSession(user.id, sessionId(request))
 
     /**
      * 앱 진입 시 현재 상태 — 진행 중 방송이 있으면 그 상세를 돌려준다.
@@ -93,17 +88,16 @@ class BroadcastController(
     )
 
     /**
-     * 방송 즉시 시작 또는 재개 — 방송 단말 세션 전용. 예약 선택 없이 사전 구성
-     * (없으면 판매 중 전체) 상품으로 새 Live를 만들어 시작한다.
+     * 방송 즉시 시작 또는 재개 — 방송 단말 세션 전용 (검증은 서비스 트랜잭션 안에서
+     * 잠금과 함께 수행된다). 예약 선택 없이 사전 구성(없으면 판매 중 전체) 상품으로
+     * 새 Live를 만들어 시작한다.
      */
     @PostMapping("/start")
     fun start(
         @AuthenticationPrincipal user: AuthUser,
         request: jakarta.servlet.http.HttpServletRequest,
-    ): BroadcastLiveDetail {
-        requireDevice(user, request)
-        return toDetail(broadcastService.start(user.id), holdsDevice = true)
-    }
+    ): BroadcastLiveDetail =
+        toDetail(broadcastService.start(user.id, sessionId(request)), holdsDevice = true)
 
     /**
      * SDK 연결(CONNECTED) 확인 후 방송 중 확정 — 방송 단말 세션 전용.
@@ -114,19 +108,17 @@ class BroadcastController(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
         request: jakarta.servlet.http.HttpServletRequest,
-    ): BroadcastLiveDetail {
-        requireDevice(user, request)
-        return toDetail(broadcastService.confirm(user.id, liveId), holdsDevice = true)
-    }
+    ): BroadcastLiveDetail =
+        toDetail(broadcastService.confirm(user.id, liveId, sessionId(request)), holdsDevice = true)
 
-    /** 종료는 방송 단말 또는 같은 Shop 구성원(Owner 대시보드 강제 종료)이 호출한다. */
+    /** 종료는 방송 단말 또는 Shop Owner(대시보드 강제 종료)만 — 서비스가 검증한다. */
     @PostMapping("/lives/{liveId}/end")
     fun end(
         @AuthenticationPrincipal user: AuthUser,
         @PathVariable liveId: Long,
         request: jakarta.servlet.http.HttpServletRequest,
     ): BroadcastLiveDetail =
-        toDetail(broadcastService.end(user.id, liveId), holdsDevice = isDevice(user, request))
+        toDetail(broadcastService.end(user.id, liveId, sessionId(request)), holdsDevice = isDevice(user, request))
 
     /** 송출 오버레이의 상품 전환 — 방송 단말 세션 전용. */
     @PutMapping("/lives/{liveId}/current-product")
@@ -135,10 +127,11 @@ class BroadcastController(
         @PathVariable liveId: Long,
         @Valid @RequestBody request: SwitchProductRequest,
         httpRequest: jakarta.servlet.http.HttpServletRequest,
-    ): BroadcastLiveDetail {
-        requireDevice(user, httpRequest)
-        return toDetail(broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId), holdsDevice = true)
-    }
+    ): BroadcastLiveDetail =
+        toDetail(
+            broadcastService.switchCurrentProduct(user.id, liveId, request.liveProductId, sessionId(httpRequest)),
+            holdsDevice = true,
+        )
 
     // ── Owner 대시보드 (방송 제어) ────────────────────────────────────────────
 

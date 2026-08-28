@@ -52,7 +52,11 @@ class AppSessionService(
     private val appSessionRepository: AppSessionRepository,
     private val membershipRepository: MembershipRepository,
     private val sessionRepository: SessionRepository<out Session>,
+    transactionManager: org.springframework.transaction.PlatformTransactionManager,
 ) {
+
+    private val transactionTemplate =
+        org.springframework.transaction.support.TransactionTemplate(transactionManager)
 
     fun tenantIdOf(userId: Long): Long =
         membershipRepository.findAllByUserId(userId).firstOrNull()?.tenantId
@@ -64,8 +68,17 @@ class AppSessionService(
      * - 다른 계정: 이전 세션이 살아 있으면 거절 — Owner가 대시보드에서 로그아웃해야 한다.
      * - 이전 세션이 이미 만료·삭제됐으면 계정과 무관하게 대체한다.
      */
-    @Transactional
     fun claim(userId: Long, newSessionId: String) {
+        try {
+            transactionTemplate.execute { doClaim(userId, newSessionId) }
+        } catch (e: org.springframework.dao.DataIntegrityViolationException) {
+            // 행이 없을 때는 잠금 대상이 없어 최초 로그인 2건이 동시에 INSERT를 경쟁할
+            // 수 있다 — 진 쪽은 새 트랜잭션에서, 이제 존재하는 행 기준으로 다시 판정한다.
+            transactionTemplate.execute { doClaim(userId, newSessionId) }
+        }
+    }
+
+    private fun doClaim(userId: Long, newSessionId: String) {
         val tenantId = tenantIdOf(userId)
         val existing = appSessionRepository.findByTenantIdForUpdate(tenantId)
         if (existing != null && existing.sessionId != newSessionId) {
@@ -83,8 +96,22 @@ class AppSessionService(
             existing.userId = userId
             existing.createdAt = OffsetDateTime.now()
         } else {
-            appSessionRepository.save(AppSession(tenantId = tenantId, sessionId = newSessionId, userId = userId))
+            appSessionRepository.saveAndFlush(
+                AppSession(tenantId = tenantId, sessionId = newSessionId, userId = userId),
+            )
         }
+    }
+
+    /**
+     * 잠금을 잡은 채로 "이 세션이 방송 단말인가"를 판정한다 — 호출자의 트랜잭션에
+     * 참여해 커밋까지 잠금이 유지되므로, 검사 통과 후 재로그인·강제 로그아웃이
+     * 세션을 대체하는 검사-사용(TOCTOU) 경쟁을 claim()/forceLogout()과 직렬화로 막는다.
+     */
+    @Transactional
+    fun isAppSessionLocked(userId: Long, sessionId: String?): Boolean {
+        if (sessionId == null) return false
+        val membership = membershipRepository.findAllByUserId(userId).firstOrNull() ?: return false
+        return appSessionRepository.findByTenantIdForUpdate(membership.tenantId)?.sessionId == sessionId
     }
 
     /** 이 세션이 앱 세션이었다면 슬롯을 비운다 (앱의 자발적 로그아웃). */
@@ -114,6 +141,16 @@ class AppSessionService(
         if (sessionId == null) return false
         val membership = membershipRepository.findAllByUserId(userId).firstOrNull() ?: return false
         return appSessionRepository.findById(membership.tenantId).orElse(null)?.sessionId == sessionId
+    }
+
+    /**
+     * 테넌트의 앱 세션 행 잠금만 선점한다 (호출자 트랜잭션에 참여).
+     * 모든 방송 조작이 app_session → Shop/Live 순서로 잠그므로, 강제 로그아웃도
+     * 같은 순서를 지켜 교착을 피한다.
+     */
+    @Transactional
+    fun lockTenant(tenantId: Long) {
+        appSessionRepository.findByTenantIdForUpdate(tenantId)
     }
 
     /** Owner의 강제 로그아웃 — 세션 저장소에서 지워 다음 요청부터 401이 된다. */

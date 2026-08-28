@@ -70,8 +70,20 @@ class BroadcastService(
      *   앱 경로에서는 Key를 회전하지 않는다(회전은 종료 시 한 곳뿐).
      * 실제 방송 중(LIVE) 확정은 SDK 연결 확인 후 confirm()이 한다.
      */
+    /**
+     * 단말(앱 세션) 검증 — 조작 트랜잭션 안에서 app_session 행 잠금을 잡고 판정한다.
+     * Controller에서 검사하면 검사와 실행 사이에 재로그인·강제 로그아웃이 세션을
+     * 대체하는 TOCTOU 경쟁이 생긴다 (claim/forceLogout과 같은 행 잠금으로 직렬화).
+     */
+    private fun requireDeviceSession(userId: Long, sessionId: String?) {
+        if (!appSessionService.isAppSessionLocked(userId, sessionId)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송 앱(단말 세션)에서만 사용할 수 있습니다.")
+        }
+    }
+
     @Transactional
-    fun start(userId: Long): Live {
+    fun start(userId: Long, sessionId: String?): Live {
+        requireDeviceSession(userId, sessionId)
         val shopId = broadcasterShopId(userId)
         // Shop 단위 직렬화: AWS Channel 생성 전에 시작 슬롯을 확정한다.
         shopRepository.findByIdForUpdate(shopId)
@@ -157,7 +169,8 @@ class BroadcastService(
      * 재연결로 새 Session이 생기면 이전 이력을 닫고 새 행을 추가한다.
      */
     @Transactional
-    fun confirm(userId: Long, liveId: Long): Live {
+    fun confirm(userId: Long, liveId: Long, sessionId: String?): Live {
+        requireDeviceSession(userId, sessionId)
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
@@ -194,14 +207,18 @@ class BroadcastService(
     }
 
     /**
-     * 방송 종료: STARTING·LIVE → ENDED. 같은 Shop 구성원(단일 앱 세션 단말 또는 Owner
-     * 대시보드)이 호출한다. 폐기 → 중단 순서: StopStream 직후 자동 재연결이 다시 붙는
-     * 경쟁을 막기 위해 Channel의 실제 Stream Key를 전부 폐기한 뒤 송출을 중단한다.
+     * 방송 종료: STARTING·LIVE → ENDED. 방송 단말(앱 세션) 또는 Shop Owner(대시보드
+     * 강제 종료)만 호출할 수 있다 — 같은 Shop의 다른 Streamer Web 세션은 403.
+     * 폐기 → 중단 순서: StopStream 직후 자동 재연결이 다시 붙는 경쟁을 막기 위해
+     * Channel의 실제 Stream Key를 전부 폐기한 뒤 송출을 중단한다.
      * 중단이 2회 모두 실패하면 종료를 확정하지 않고 502로 실패시켜 재시도를 받는다.
      * 멱등: 이미 ENDED인 방송의 재요청은 성공으로 응답한다.
      */
     @Transactional
-    fun end(userId: Long, liveId: Long): Live {
+    fun end(userId: Long, liveId: Long, sessionId: String?): Live {
+        if (!appSessionService.isAppSessionLocked(userId, sessionId) && !isOwner(userId)) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "방송 단말 또는 Owner만 종료할 수 있습니다.")
+        }
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
@@ -237,12 +254,19 @@ class BroadcastService(
     @Transactional
     fun forceLogoutApp(ownerUserId: Long) {
         val shopId = ownerShopIdOrThrow(ownerUserId)
-        liveRepository.findActiveByShopIdForUpdate(shopId, ACTIVE_STATUSES)?.let { active ->
-            end(ownerUserId, active.id!!)
-        }
         val tenantId = membershipRepository.findByUserIdAndRole(ownerUserId, MembershipRole.OWNER)!!.tenantId
+        // 잠금 순서 통일(app_session → Shop/Live): 단말의 start/confirm과 교착하지 않고,
+        // 이 잠금이 커밋까지 유지되어 진행 중인 단말 조작과 직렬화된다.
+        appSessionService.lockTenant(tenantId)
+        liveRepository.findActiveByShopIdForUpdate(shopId, ACTIVE_STATUSES)?.let { active ->
+            end(ownerUserId, active.id!!, sessionId = null) // Owner 권한 경로
+        }
         appSessionService.forceLogout(tenantId)
     }
+
+    /** 요청자가 이 Shop의 Owner인가 (강제 종료 권한). */
+    private fun isOwner(userId: Long): Boolean =
+        membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER) != null
 
     /** Owner 대시보드용 — 현재 앱 세션 정보 (없으면 null). */
     @Transactional
@@ -259,9 +283,10 @@ class BroadcastService(
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
     }
 
-    /** 방송 중 현재 판매 상품 전환. */
+    /** 방송 중 현재 판매 상품 전환 — 방송 단말 전용. */
     @Transactional
-    fun switchCurrentProduct(userId: Long, liveId: Long, liveProductId: Long): Live {
+    fun switchCurrentProduct(userId: Long, liveId: Long, liveProductId: Long, sessionId: String?): Live {
+        requireDeviceSession(userId, sessionId)
         val shopId = broadcasterShopId(userId)
         val live = liveRepository.findByIdAndShopIdForUpdate(liveId, shopId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "Live를 찾을 수 없습니다.")
@@ -295,6 +320,8 @@ class BroadcastService(
     @Transactional
     fun saveProductConfig(ownerUserId: Long, productIds: List<Long>): List<BroadcastProductConfig> {
         val shopId = ownerShopIdOrThrow(ownerUserId)
+        // 동시 전체 교체가 섞이거나 PK가 충돌하지 않도록 Shop 행 잠금으로 직렬화한다.
+        shopRepository.findByIdForUpdate(shopId)
         if (productIds.toSet().size != productIds.size) {
             throw ResponseStatusException(HttpStatus.BAD_REQUEST, "같은 상품을 중복 구성할 수 없습니다.")
         }

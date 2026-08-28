@@ -519,6 +519,9 @@ class BroadcastActivity : AppCompatActivity() {
                 delay(delayMs)
                 delayMs = BroadcastUi.nextConfirmDelay(delayMs)
             }
+            // 60초 소진 — 폴링 render가 곧바로 새 재시도 묶음을 만들지 않도록 재확정
+            // 필요 표시를 내린다 (다음 CONNECTED 이벤트에서 다시 켜진다).
+            needsConfirm = false
             if (detail?.optString("status") == "STARTING") {
                 Toast.makeText(
                     this@BroadcastActivity,

@@ -155,6 +155,10 @@ class BroadcastFlowTest {
         return mapper.readTree(result.response.contentAsString).get("id").asLong()
     }
 
+    /** SESSION 쿠키 값은 세션 ID의 Base64 인코딩이다 (spring-session 기본 직렬화). */
+    private fun sessionIdOf(cookie: Cookie): String =
+        String(java.util.Base64.getDecoder().decode(cookie.value))
+
     private fun startBroadcast(session: Cookie): tools.jackson.databind.JsonNode {
         val body = mockMvc.perform(post("/api/broadcast/start").cookie(session))
             .andExpect(status().isOk).andReturn().response.contentAsString
@@ -253,6 +257,9 @@ class BroadcastFlowTest {
         val web = signupOwner("bc-relogin@test.local")
         createProduct(web, "재로그인 상품")
         val first = appLogin("bc-relogin@test.local", "password-123")
+        val userId = mapper.readTree(
+            mockMvc.perform(get("/api/auth/me").cookie(first)).andReturn().response.contentAsString,
+        ).get("id").asLong()
         val second = appLogin("bc-relogin@test.local", "password-123")
 
         // 이전 앱 세션은 무효화되고(크래시 복구 경로), 새 세션만 유효하다.
@@ -260,6 +267,38 @@ class BroadcastFlowTest {
             .andExpect(status().isUnauthorized)
         mockMvc.perform(get("/api/broadcast/current").cookie(second))
             .andExpect(status().isOk)
+
+        // 검사-사용(TOCTOU) 방어: 대체된 세션 ID로 서비스 조작이 직접 실행돼도
+        // 트랜잭션 안의 잠금 검증이 403으로 거절한다 (Controller 통과 후 대체된 경우와 동일 경로).
+        val staleAttempt = runCatching { broadcastService.start(userId, sessionIdOf(first)) }
+        val ex = staleAttempt.exceptionOrNull() as? org.springframework.web.server.ResponseStatusException
+        assert(ex?.statusCode?.value() == 403) { "대체된 세션의 시작은 403이어야 한다: $staleAttempt" }
+    }
+
+    @Test
+    fun `최초 앱 로그인 2건이 동시에 들어와도 서버 오류 없이 한 세션으로 수렴한다`() {
+        signupOwner("bc-firstlogin@test.local")
+        // 이 테넌트는 app_session 행이 없다 — INSERT 경쟁 경로.
+        val statuses = java.util.concurrent.ConcurrentLinkedQueue<Int>()
+        val startLatch = java.util.concurrent.CountDownLatch(1)
+        val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
+        repeat(2) {
+            executor.submit {
+                startLatch.await()
+                val result = mockMvc.perform(
+                    post("/api/auth/login").contentType(MediaType.APPLICATION_JSON)
+                        .header("X-Client", "streamer-app")
+                        .content("""{"email":"bc-firstlogin@test.local","password":"password-123"}"""),
+                ).andReturn()
+                statuses += result.response.status
+            }
+        }
+        startLatch.countDown()
+        executor.shutdown()
+        check(executor.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS))
+
+        assert(statuses.all { it == 200 || it == 409 }) { "동시 최초 로그인이 서버 오류가 되면 안 된다: $statuses" }
+        assert(statuses.count { it == 200 } >= 1) { "최소 한 건은 성공해야 한다: $statuses" }
     }
 
     @Test
@@ -433,6 +472,7 @@ class BroadcastFlowTest {
 
         // 한쪽은 생성, 다른 쪽은 재개(잠금 직렬화) — Channel은 1개만 만들어진다.
         stubIvs.streamAvailable = false
+        val appSessionId = sessionIdOf(app)
         val before = stubIvs.created.get()
         val start = java.util.concurrent.CountDownLatch(1)
         val executor = java.util.concurrent.Executors.newFixedThreadPool(2)
@@ -441,7 +481,7 @@ class BroadcastFlowTest {
             executor.submit {
                 start.await()
                 try {
-                    liveIds += broadcastService.start(userId).id!!
+                    liveIds += broadcastService.start(userId, appSessionId).id!!
                 } catch (e: Exception) { /* 409 허용 */ }
             }
         }
@@ -506,7 +546,20 @@ class BroadcastFlowTest {
                 .contentType(MediaType.APPLICATION_JSON).content("""{"liveProductId":$lp}"""),
         ).andExpect(status().isForbidden)
 
-        // 종료는 Owner 대시보드(Web)에서도 가능해야 한다 (강제 종료 경로).
+        // 같은 Shop이라도 단말·Owner가 아닌 Streamer Web 세션은 종료할 수 없다.
+        mockMvc.perform(
+            post("/api/streamers").cookie(web).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"loginId":"device-streamer","temporaryPassword":"temp-pass-123","name":"단말 외"}"""),
+        ).andExpect(status().isCreated)
+        val streamerWeb = webLogin("device-streamer", "temp-pass-123")
+        mockMvc.perform(
+            post("/api/auth/password").cookie(streamerWeb).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"currentPassword":"temp-pass-123","newPassword":"changed-pass-456"}"""),
+        ).andExpect(status().isOk)
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(streamerWeb))
+            .andExpect(status().isForbidden)
+
+        // 종료는 Owner 대시보드(Web)에서는 가능해야 한다 (강제 종료 경로).
         mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(web))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.status").value("ENDED"))
