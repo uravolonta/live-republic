@@ -53,6 +53,7 @@ export default function LiveViewerPage() {
   const [loadFailed, setLoadFailed] = useState(false);
   const [playerReady, setPlayerReady] = useState(false);
   const [muted, setMuted] = useState(true);
+  const [videoPlaying, setVideoPlaying] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const playerRef = useRef<IvsPlayer | null>(null);
@@ -131,10 +132,11 @@ export default function LiveViewerPage() {
 
   return (
     <main className="relative mx-auto flex min-h-screen max-w-lg flex-col bg-black text-white">
+      {/* onReady는 스크립트가 이미 로드된 재마운트에서도 호출된다 (onLoad는 최초 1회만). */}
       <Script
         src="https://player.live-video.net/1.24.0/amazon-ivs-player.min.js"
         strategy="afterInteractive"
-        onLoad={() => setPlayerReady(true)}
+        onReady={() => setPlayerReady(true)}
       />
 
       <header className="absolute inset-x-0 top-0 z-10 flex items-center gap-2 bg-gradient-to-b from-black/70 to-transparent p-4">
@@ -148,9 +150,24 @@ export default function LiveViewerPage() {
         ref={videoRef}
         playsInline
         muted
+        onPlaying={() => setVideoPlaying(true)}
+        onPause={() => setVideoPlaying(false)}
         className="h-screen w-full object-contain"
         data-testid="viewer-video"
       />
+
+      {/* 자동재생이 차단된 환경(iOS 저전력 모드 등) — 탭 제스처로 재생을 시작한다. */}
+      {live?.status === "LIVE" && !videoPlaying && (
+        <button
+          onClick={() => {
+            playerRef.current?.play();
+            void videoRef.current?.play().catch(() => undefined);
+          }}
+          className="absolute inset-0 z-10 flex items-center justify-center"
+        >
+          <span className="rounded-full bg-black/70 px-6 py-3 text-lg">▶ 탭하여 재생</span>
+        </button>
+      )}
 
       {/* 상태 안내 (영상 위 중앙) */}
       {notFound && <CenterNotice message="존재하지 않는 방송입니다." />}
