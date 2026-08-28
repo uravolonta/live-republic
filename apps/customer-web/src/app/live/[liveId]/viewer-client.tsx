@@ -89,6 +89,11 @@ export function LiveViewer({ liveId }: { liveId: string }) {
     return () => clearInterval(timer);
   }, [load]);
 
+  /** 렌더 사이클과 분리해 재생 성공·실패를 기록한다 (effect 내 동기 setState 회피). */
+  const markPlaybackError = useCallback((failed: boolean) => {
+    queueMicrotask(() => setPlaybackError(failed));
+  }, []);
+
   // 방송 상태·재생 URL·스크립트 상태에 맞춰 Player를 붙이고 뗀다.
   useEffect(() => {
     const video = videoRef.current;
@@ -121,9 +126,9 @@ export function LiveViewer({ liveId }: { liveId: string }) {
         player.play();
         playerRef.current = player;
         playingUrlRef.current = url; // 초기화가 실제로 성공한 뒤에만 기록한다
-        setPlaybackError(false);
+        markPlaybackError(false);
       } catch {
-        setPlaybackError(true);
+        markPlaybackError(true);
       }
       return;
     }
@@ -133,11 +138,11 @@ export function LiveViewer({ liveId }: { liveId: string }) {
       video.muted = true;
       void video.play().catch(() => undefined);
       playingUrlRef.current = url;
-      setPlaybackError(false);
+      markPlaybackError(false);
     } else {
-      setPlaybackError(true);
+      markPlaybackError(true);
     }
-  }, [live?.status, live?.playbackUrl, scriptState, retryTick]);
+  }, [live?.status, live?.playbackUrl, scriptState, retryTick, markPlaybackError]);
 
   useEffect(() => () => playerRef.current?.delete(), []);
 
