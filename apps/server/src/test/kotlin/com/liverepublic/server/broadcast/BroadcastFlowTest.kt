@@ -566,6 +566,64 @@ class BroadcastFlowTest {
     }
 
     @Test
+    fun `앱 세션의 자발적 로그아웃은 진행 중 방송을 먼저 종료한다`() {
+        val web = signupOwner("bc-logout@test.local")
+        createProduct(web, "로그아웃 상품")
+        val app = appLogin("bc-logout@test.local", "password-123")
+        val liveId = startBroadcast(app).get("id").asLong()
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(app)).andExpect(status().isOk)
+
+        // 로그아웃이 슬롯만 비우면 이미 전달된 Key로 송출이 계속된다 — 종료를 선행해야 한다.
+        val deletedBefore = stubIvs.keysDeleted.get()
+        val stopsBefore = stubIvs.stops.get()
+        mockMvc.perform(post("/api/auth/logout").cookie(app)).andExpect(status().isNoContent)
+        assert(stubIvs.keysDeleted.get() > deletedBefore) { "로그아웃은 Key 폐기를 선행해야 한다" }
+        assert(stubIvs.stops.get() == stopsBefore + 1) { "로그아웃은 송출 중단을 선행해야 한다" }
+        mockMvc.perform(get("/api/broadcast/current").cookie(web))
+            .andExpect(jsonPath("$.live").value(org.hamcrest.Matchers.nullValue()))
+        // 슬롯이 비어 다른 흐름이 이어질 수 있다.
+        appLogin("bc-logout@test.local", "password-123")
+    }
+
+    @Autowired
+    lateinit var membershipRepository: com.liverepublic.server.tenant.MembershipRepository
+
+    @Test
+    fun `다중 Membership에서도 앱 세션과 방송은 같은 테넌트 규칙을 쓴다`() {
+        // A: 자기 테넌트의 OWNER. B 테넌트의 STREAMER Membership을 직접 추가해
+        // (API로는 아직 만들 수 없는 데이터) 다중 소속을 재현한다.
+        val webA = signupOwner("bc-multi-a@test.local")
+        createProduct(webA, "A 테넌트 상품")
+        signupOwner("bc-multi-b@test.local")
+        val userA = mapper.readTree(
+            mockMvc.perform(get("/api/auth/me").cookie(webA)).andReturn().response.contentAsString,
+        ).get("id").asLong()
+        val tenantB = membershipRepository.findAllByUserId(
+            mapper.readTree(
+                mockMvc.perform(get("/api/auth/me").cookie(webLogin("bc-multi-b@test.local", "password-123")))
+                    .andReturn().response.contentAsString,
+            ).get("id").asLong(),
+        ).first().tenantId
+        membershipRepository.save(
+            com.liverepublic.server.tenant.Membership(
+                userId = userA, tenantId = tenantB, role = com.liverepublic.server.tenant.MembershipRole.STREAMER,
+            ),
+        )
+
+        // OWNER 우선 규칙: 앱 세션 점유 테넌트와 방송 Shop 모두 A의 테넌트여야 한다.
+        val app = appLogin("bc-multi-a@test.local", "password-123")
+        val started = startBroadcast(app)
+        assert(started.get("products").get(0).get("name").asText() == "A 테넌트 상품") {
+            "방송은 OWNER 테넌트의 Shop에서 시작돼야 한다"
+        }
+        // A의 Owner Web 대시보드에서 자기 테넌트의 앱 세션이 보인다 (같은 테넌트를 점유했다는 증거).
+        mockMvc.perform(get("/api/broadcast/app-session").cookie(webA))
+            .andExpect(jsonPath("$.session.accountName").isNotEmpty)
+        mockMvc.perform(post("/api/broadcast/lives/${started.get("id").asLong()}/end").cookie(app))
+            .andExpect(status().isOk)
+    }
+
+    @Test
     fun `다른 Shop 사용자는 남의 방송을 조작할 수 없다`() {
         val webA = signupOwner("bc-a@test.local")
         createProduct(webA, "A 상품")

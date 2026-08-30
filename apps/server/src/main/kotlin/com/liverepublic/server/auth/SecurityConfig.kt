@@ -44,6 +44,8 @@ class SecurityConfig {
                 // 오류가 전부 401로 가려진다. ERROR dispatch는 허용한다.
                 it.dispatcherTypeMatchers(DispatcherType.ERROR).permitAll()
                     .requestMatchers("/api/auth/signup", "/api/auth/login", "/api/status").permitAll()
+                    // Customer 시청은 비로그인 허용 (2026-08-29 정책)
+                    .requestMatchers("/api/viewer/**").permitAll()
                     .requestMatchers("/actuator/health", "/actuator/health/**").permitAll()
                     .anyRequest().authenticated()
             }

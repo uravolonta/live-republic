@@ -7,7 +7,6 @@ import com.liverepublic.server.live.LiveRepository
 import com.liverepublic.server.live.LiveStatus
 import com.liverepublic.server.product.ProductRepository
 import com.liverepublic.server.shop.ShopRepository
-import com.liverepublic.server.tenant.MembershipRepository
 import com.liverepublic.server.tenant.MembershipRole
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpStatus
@@ -26,7 +25,7 @@ import java.time.format.DateTimeFormatter
  */
 @Service
 class BroadcastService(
-    private val membershipRepository: MembershipRepository,
+    private val membershipResolver: com.liverepublic.server.tenant.MembershipResolver,
     private val shopRepository: ShopRepository,
     private val liveRepository: LiveRepository,
     private val liveProductRepository: LiveProductRepository,
@@ -37,10 +36,13 @@ class BroadcastService(
     private val ivsService: IvsService,
 ) {
 
-    /** 요청자의 방송 가능한 Shop (OWNER 또는 STREAMER Membership). */
+    /**
+     * 요청자의 방송 가능한 Shop — 테넌트 결정은 앱 세션과 같은 단일 규칙
+     * (MembershipResolver)을 쓴다: 다른 규칙을 쓰면 앱 세션을 점유한 테넌트와
+     * 방송 Shop이 어긋날 수 있다.
+     */
     fun broadcasterShopId(userId: Long): Long {
-        val membership = membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER)
-            ?: membershipRepository.findByUserIdAndRole(userId, MembershipRole.STREAMER)
+        val membership = membershipResolver.primary(userId)
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
         return shopRepository.findByTenantId(membership.tenantId)?.id
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
@@ -253,8 +255,8 @@ class BroadcastService(
      */
     @Transactional
     fun forceLogoutApp(ownerUserId: Long) {
+        val tenantId = ownerMembershipOrThrow(ownerUserId).tenantId
         val shopId = ownerShopIdOrThrow(ownerUserId)
-        val tenantId = membershipRepository.findByUserIdAndRole(ownerUserId, MembershipRole.OWNER)!!.tenantId
         // 잠금 순서 통일(app_session → Shop/Live): 단말의 start/confirm과 교착하지 않고,
         // 이 잠금이 커밋까지 유지되어 진행 중인 단말 조작과 직렬화된다.
         appSessionService.lockTenant(tenantId)
@@ -264,24 +266,40 @@ class BroadcastService(
         appSessionService.forceLogout(tenantId)
     }
 
-    /** 요청자가 이 Shop의 Owner인가 (강제 종료 권한). */
-    private fun isOwner(userId: Long): Boolean =
-        membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER) != null
+    /** 요청자가 자기 테넌트의 Owner인가 (강제 종료 권한 — 대상 Live는 항상 자기 Shop 범위). */
+    private fun isOwner(userId: Long): Boolean = membershipResolver.isOwner(userId)
+
+    /**
+     * 앱 세션의 자발적 로그아웃 전에 진행 중 방송을 종료한다 (불변식 C: 로그아웃만으로는
+     * 이미 전달된 Key로 RTMPS 송출이 계속된다 — Owner 강제 로그아웃과 같은 규칙).
+     */
+    @Transactional
+    fun endActiveBroadcastForAppSession(sessionId: String) {
+        val appSession = appSessionService.bySessionId(sessionId) ?: return // 앱 세션이 아니면 무관
+        // 잠금 순서 통일: app_session → Shop/Live
+        appSessionService.lockTenant(appSession.tenantId)
+        val shopId = shopRepository.findByTenantId(appSession.tenantId)?.id ?: return
+        liveRepository.findActiveByShopIdForUpdate(shopId, ACTIVE_STATUSES)?.let { active ->
+            end(appSession.userId, active.id!!, sessionId)
+        }
+    }
 
     /** Owner 대시보드용 — 현재 앱 세션 정보 (없으면 null). */
     @Transactional
-    fun currentAppSession(ownerUserId: Long): com.liverepublic.server.auth.AppSession? {
-        ownerShopIdOrThrow(ownerUserId)
-        val tenantId = membershipRepository.findByUserIdAndRole(ownerUserId, MembershipRole.OWNER)!!.tenantId
-        return appSessionService.current(tenantId)
+    fun currentAppSession(ownerUserId: Long): com.liverepublic.server.auth.AppSession? =
+        appSessionService.current(ownerMembershipOrThrow(ownerUserId).tenantId)
+
+    private fun ownerMembershipOrThrow(userId: Long): com.liverepublic.server.tenant.Membership {
+        val membership = membershipResolver.primary(userId)
+        if (membership?.role != MembershipRole.OWNER) {
+            throw ResponseStatusException(HttpStatus.FORBIDDEN, "Owner만 사용할 수 있습니다.")
+        }
+        return membership
     }
 
-    private fun ownerShopIdOrThrow(userId: Long): Long {
-        val membership = membershipRepository.findByUserIdAndRole(userId, MembershipRole.OWNER)
-            ?: throw ResponseStatusException(HttpStatus.FORBIDDEN, "Owner만 사용할 수 있습니다.")
-        return shopRepository.findByTenantId(membership.tenantId)?.id
+    private fun ownerShopIdOrThrow(userId: Long): Long =
+        shopRepository.findByTenantId(ownerMembershipOrThrow(userId).tenantId)?.id
             ?: throw ResponseStatusException(HttpStatus.NOT_FOUND, "연결된 Shop이 없습니다.")
-    }
 
     /** 방송 중 현재 판매 상품 전환 — 방송 단말 전용. */
     @Transactional

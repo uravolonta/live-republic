@@ -46,6 +46,24 @@ class Membership(
 
 interface TenantRepository : JpaRepository<Tenant, Long>
 
+/**
+ * 사용자 → 테넌트 결정의 단일 규칙. 앱 세션과 방송이 서로 다른 규칙으로 테넌트를
+ * 고르면(임의 첫 행 vs OWNER 우선) 다중 Membership 데이터에서 앱 세션을 점유한
+ * 테넌트와 실제 방송 Shop이 어긋날 수 있다 — 모든 경로가 이 결정을 공유한다.
+ * 규칙: OWNER 우선, 동순위면 가장 오래된 Membership (결정적).
+ */
+@org.springframework.stereotype.Service
+class MembershipResolver(private val membershipRepository: MembershipRepository) {
+
+    fun primary(userId: Long): Membership? =
+        membershipRepository.findAllByUserId(userId)
+            .sortedWith(compareBy({ it.role != MembershipRole.OWNER }, { it.id }))
+            .firstOrNull()
+
+    /** 기준 Membership이 OWNER인가 (자기 테넌트의 Owner 권한 판정). */
+    fun isOwner(userId: Long): Boolean = primary(userId)?.role == MembershipRole.OWNER
+}
+
 interface MembershipRepository : JpaRepository<Membership, Long> {
     fun findByUserIdAndRole(userId: Long, role: MembershipRole): Membership?
     fun findAllByUserId(userId: Long): List<Membership>

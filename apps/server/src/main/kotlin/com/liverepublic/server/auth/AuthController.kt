@@ -55,6 +55,7 @@ class AuthController(
     private val authService: AuthService,
     private val securityContextRepository: SecurityContextRepository,
     private val appSessionService: AppSessionService,
+    private val broadcastService: com.liverepublic.server.broadcast.BroadcastService,
 ) {
 
     companion object {
@@ -135,7 +136,10 @@ class AuthController(
     @ResponseStatus(HttpStatus.NO_CONTENT)
     fun logout(httpRequest: HttpServletRequest) {
         httpRequest.getSession(false)?.let { session ->
-            // 앱 세션이었다면 테넌트의 앱 세션 슬롯도 비운다.
+            // 앱 세션(방송 단말)의 자발적 로그아웃도 진행 중 방송의 종료를 선행한다 —
+            // 슬롯만 비우면 이미 전달된 Key로 RTMPS 송출이 계속되는 채로 다른 계정이
+            // 슬롯을 차지할 수 있다. 종료(Key 폐기→중단) 실패 시 로그아웃도 실패한다(재시도).
+            broadcastService.endActiveBroadcastForAppSession(session.id)
             appSessionService.release(session.id)
             session.invalidate()
         }
