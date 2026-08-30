@@ -12,6 +12,10 @@ import {
   type ProductConfigEntry,
 } from "@/lib/api";
 
+// 시청(공유) 링크의 기준 도메인 — Customer Web production.
+const CUSTOMER_WEB_URL =
+  process.env.NEXT_PUBLIC_CUSTOMER_WEB_URL ?? "https://live-republic-customer-web.vercel.app";
+
 /**
  * 방송 제어 대시보드 (2026-08-28 정책):
  * 앱은 테넌트당 1개 세션만 로그인되며, Owner는 여기서 진행 중 방송 강제 종료·앱 세션
@@ -146,6 +150,22 @@ export default function BroadcastControlPage() {
               판매 상품 {live.products.length}개
               {live.startedAt && ` · 시작 ${new Date(live.startedAt).toLocaleString()}`}
             </p>
+            <div className="flex items-center gap-2 rounded border bg-gray-50 p-2">
+              <span className="truncate text-xs text-gray-600">
+                {`${CUSTOMER_WEB_URL}/live/${live.id}`}
+              </span>
+              <button
+                onClick={() => {
+                  void navigator.clipboard
+                    .writeText(`${CUSTOMER_WEB_URL}/live/${live.id}`)
+                    .then(() => setMessage("시청 링크를 복사했습니다. SNS에 공유하세요."))
+                    .catch(() => setError("복사에 실패했습니다. 링크를 직접 선택해 복사하세요."));
+                }}
+                className="shrink-0 rounded border px-2 py-1 text-xs"
+              >
+                시청 링크 복사
+              </button>
+            </div>
             <button
               onClick={() => void forceEnd(live.id)}
               disabled={busy}
