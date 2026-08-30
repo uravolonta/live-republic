@@ -58,6 +58,45 @@ class ViewerFlowTest {
     }
 
     @Test
+    fun `Shop 상시 URL 하나로 방송 여부와 시청 정보를 확인한다`() {
+        val web = signupOwner("viewer-shop@test.local")
+        mockMvc.perform(
+            post("/api/products").cookie(web).contentType(MediaType.APPLICATION_JSON)
+                .content("""{"name":"상시 URL 상품","price":5000,"optionGroups":[{"name":"색상","options":["검정"]}]}"""),
+        ).andExpect(status().isCreated)
+        val shopId = mapper.readTree(
+            mockMvc.perform(get("/api/auth/me").cookie(web)).andReturn().response.contentAsString,
+        ).get("shopId").asLong()
+
+        // 방송 전 — 같은 주소가 "방송 중 아님"을 알려준다 (비로그인).
+        mockMvc.perform(get("/api/viewer/shops/$shopId"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.shopName").isNotEmpty)
+            .andExpect(jsonPath("$.live").value(org.hamcrest.Matchers.nullValue()))
+
+        // 방송 시작 → 같은 주소에 진행 중 방송이 실린다.
+        val app = appLogin("viewer-shop@test.local")
+        val liveId = mapper.readTree(
+            mockMvc.perform(post("/api/broadcast/start").cookie(app))
+                .andExpect(status().isOk).andReturn().response.contentAsString,
+        ).get("id").asLong()
+        mockMvc.perform(get("/api/viewer/shops/$shopId"))
+            .andExpect(jsonPath("$.live.id").value(liveId))
+            .andExpect(jsonPath("$.live.status").value("STARTING"))
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/confirm").cookie(app)).andExpect(status().isOk)
+        mockMvc.perform(get("/api/viewer/shops/$shopId"))
+            .andExpect(jsonPath("$.live.status").value("LIVE"))
+            .andExpect(jsonPath("$.live.playbackUrl").isNotEmpty)
+
+        // 종료 → 다시 "방송 중 아님".
+        mockMvc.perform(post("/api/broadcast/lives/$liveId/end").cookie(app)).andExpect(status().isOk)
+        mockMvc.perform(get("/api/viewer/shops/$shopId"))
+            .andExpect(jsonPath("$.live").value(org.hamcrest.Matchers.nullValue()))
+
+        mockMvc.perform(get("/api/viewer/shops/999999")).andExpect(status().isNotFound)
+    }
+
+    @Test
     fun `비로그인 시청자가 방송 상태·현재 상품·품절 여부를 본다 - 재고 수치는 노출되지 않는다`() {
         val web = signupOwner("viewer-flow@test.local")
         // 상품 2개 — 구성이 없으면 판매 중 전체(최신 등록 순)가 연결되므로,
