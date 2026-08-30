@@ -1,6 +1,5 @@
 package com.liverepublic.server.auth
 
-import com.liverepublic.server.tenant.MembershipRepository
 import jakarta.persistence.Column
 import jakarta.persistence.Entity
 import jakarta.persistence.Id
@@ -50,7 +49,7 @@ interface AppSessionRepository : JpaRepository<AppSession, Long> {
 @Service
 class AppSessionService(
     private val appSessionRepository: AppSessionRepository,
-    private val membershipRepository: MembershipRepository,
+    private val membershipResolver: com.liverepublic.server.tenant.MembershipResolver,
     private val sessionRepository: SessionRepository<out Session>,
     transactionManager: org.springframework.transaction.PlatformTransactionManager,
 ) {
@@ -59,7 +58,7 @@ class AppSessionService(
         org.springframework.transaction.support.TransactionTemplate(transactionManager)
 
     fun tenantIdOf(userId: Long): Long =
-        membershipRepository.findAllByUserId(userId).firstOrNull()?.tenantId
+        membershipResolver.primary(userId)?.tenantId
             ?: throw ResponseStatusException(HttpStatus.CONFLICT, "연결된 Shop이 없습니다. Owner Web에서 먼저 Shop을 만드세요.")
 
     /**
@@ -110,9 +109,13 @@ class AppSessionService(
     @Transactional
     fun isAppSessionLocked(userId: Long, sessionId: String?): Boolean {
         if (sessionId == null) return false
-        val membership = membershipRepository.findAllByUserId(userId).firstOrNull() ?: return false
+        val membership = membershipResolver.primary(userId) ?: return false
         return appSessionRepository.findByTenantIdForUpdate(membership.tenantId)?.sessionId == sessionId
     }
+
+    /** 세션 ID로 앱 세션 행 조회 — 자발적 로그아웃의 방송 종료 선행 판단에 쓴다. */
+    @Transactional(readOnly = true)
+    fun bySessionId(sessionId: String): AppSession? = appSessionRepository.findBySessionId(sessionId)
 
     /** 이 세션이 앱 세션이었다면 슬롯을 비운다 (앱의 자발적 로그아웃). */
     @Transactional
@@ -139,7 +142,7 @@ class AppSessionService(
     @Transactional(readOnly = true)
     fun isAppSession(userId: Long, sessionId: String?): Boolean {
         if (sessionId == null) return false
-        val membership = membershipRepository.findAllByUserId(userId).firstOrNull() ?: return false
+        val membership = membershipResolver.primary(userId) ?: return false
         return appSessionRepository.findById(membership.tenantId).orElse(null)?.sessionId == sessionId
     }
 
