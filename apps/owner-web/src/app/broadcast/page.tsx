@@ -8,6 +8,7 @@ import {
   errorMessage,
   type AppSessionInfo,
   type CurrentBroadcast,
+  type Me,
   type Product,
   type ProductConfigEntry,
 } from "@/lib/api";
@@ -24,6 +25,7 @@ const CUSTOMER_WEB_URL =
 export default function BroadcastControlPage() {
   const router = useRouter();
   const [current, setCurrent] = useState<CurrentBroadcast | null>(null);
+  const [shopId, setShopId] = useState<number | null>(null);
   const [appSession, setAppSession] = useState<AppSessionInfo | null>(null);
   const [allProducts, setAllProducts] = useState<Product[]>([]);
   const [configIds, setConfigIds] = useState<number[]>([]);
@@ -33,11 +35,12 @@ export default function BroadcastControlPage() {
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
-    const [currentRes, sessionRes, productRes, configRes] = await Promise.all([
+    const [currentRes, sessionRes, productRes, configRes, meRes] = await Promise.all([
       api<CurrentBroadcast>("/api/broadcast/current"),
       api<AppSessionInfo>("/api/broadcast/app-session"),
       api<Product[]>("/api/products"),
       api<ProductConfigEntry[]>("/api/broadcast/config/products"),
+      api<Me>("/api/auth/me"),
     ]);
     if (currentRes.status === 401) {
       router.replace("/login");
@@ -50,6 +53,7 @@ export default function BroadcastControlPage() {
       return;
     }
     setLoadFailed(false);
+    setShopId(meRes.body?.shopId ?? null);
     setCurrent(currentRes.body);
     setAppSession(sessionRes.body);
     setAllProducts(productRes.body ?? []);
@@ -136,6 +140,30 @@ export default function BroadcastControlPage() {
       {message && <p className="text-sm text-green-600">{message}</p>}
       {error && <p className="text-sm text-red-600">{error}</p>}
 
+      {shopId !== null && (
+        <section className="rounded-lg border p-4">
+          <h2 className="mb-1 font-semibold">상시 시청 링크</h2>
+          <p className="mb-2 text-xs text-gray-500">
+            우리 상점의 고정 주소입니다 — SNS 프로필·공지에 걸어 두세요. 방송을 시작하면
+            이 주소로 들어온 시청자가 자동으로 연결됩니다.
+          </p>
+          <div className="flex items-center gap-2 rounded border bg-gray-50 p-2">
+            <span className="truncate text-xs text-gray-600">{`${CUSTOMER_WEB_URL}/shop/${shopId}`}</span>
+            <button
+              onClick={() => {
+                void navigator.clipboard
+                  .writeText(`${CUSTOMER_WEB_URL}/shop/${shopId}`)
+                  .then(() => setMessage("시청 링크를 복사했습니다."))
+                  .catch(() => setError("복사에 실패했습니다. 링크를 직접 선택해 복사하세요."));
+              }}
+              className="shrink-0 rounded border px-2 py-1 text-xs"
+            >
+              링크 복사
+            </button>
+          </div>
+        </section>
+      )}
+
       <section className="rounded-lg border p-4">
         <h2 className="mb-2 font-semibold">진행 중 방송</h2>
         {live ? (
@@ -150,22 +178,6 @@ export default function BroadcastControlPage() {
               판매 상품 {live.products.length}개
               {live.startedAt && ` · 시작 ${new Date(live.startedAt).toLocaleString()}`}
             </p>
-            <div className="flex items-center gap-2 rounded border bg-gray-50 p-2">
-              <span className="truncate text-xs text-gray-600">
-                {`${CUSTOMER_WEB_URL}/live/${live.id}`}
-              </span>
-              <button
-                onClick={() => {
-                  void navigator.clipboard
-                    .writeText(`${CUSTOMER_WEB_URL}/live/${live.id}`)
-                    .then(() => setMessage("시청 링크를 복사했습니다. SNS에 공유하세요."))
-                    .catch(() => setError("복사에 실패했습니다. 링크를 직접 선택해 복사하세요."));
-                }}
-                className="shrink-0 rounded border px-2 py-1 text-xs"
-              >
-                시청 링크 복사
-              </button>
-            </div>
             <button
               onClick={() => void forceEnd(live.id)}
               disabled={busy}
